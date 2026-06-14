@@ -1,0 +1,31 @@
+aiogram==3.15.0
+pydantic-settings==2.7.0
+aiosqlite==0.20.0
+loguru==0.7.2
+
+# Mini App API
+fastapi==0.115.6
+uvicorn==0.32.1
+python-multipart==0.0.20
+httpx==0.27.2
+
+# Playwright (Turnitin automation)
+playwright==1.49.0
+
+# Humanizer (StealthGPT bypass Vercel WAF)
+curl-cffi==0.7.4
+
+# Kaspi PDF parsing
+PyMuPDF==1.24.14
+
+# File parsing for Humanizer input
+python-docx==1.1.2
+
+# File parsing for Turnitin input
+pdfplumber==0.11.4
+
+# Language detection (AI-only check)
+lingua-language-detector==2.0.2
+
+# Settings
+python-dotenv==1.0.1

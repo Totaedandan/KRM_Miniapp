@@ -1,0 +1,13 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8000:8000"               # FastAPI Mini App (MINI_APP_PORT)
+    volumes:
+      - ./data:/app/bot/data        # БД, отчёты, загрузки
+      - ./bot/assets:/app/bot/assets  # QR-код Kaspi
+    shm_size: "256mb"              # нужен Playwright для Chromium
+    environment:
+      - PYTHONUNBUFFERED=1

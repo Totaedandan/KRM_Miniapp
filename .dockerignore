@@ -1,0 +1,34 @@
+# Виртуальные окружения (не нужны в образе — зависимости ставятся через pip)
+venv/
+winvenv/
+bot/venv/
+**/venv/
+**/.venv/
+
+# Python кэш
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Локальные данные (монтируются через volume)
+data/
+reports/
+uploads/
+bot.db
+*.sqlite
+*.sqlite3
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+**/.DS_Store
+
+# VCS
+.git/
+.gitignore
+
+# Прочее
+README.md
+*.log

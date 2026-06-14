@@ -1,0 +1,21 @@
+# Secrets — NEVER commit
+.env
+.env.*
+!.env.example
+
+# Python venvs
+venv/
+winvenv/
+__pycache__/
+*.pyc
+
+# Runtime data / artifacts
+bot.db
+*.db
+data/
+reports/
+uploads/
+
+# Editor / OS
+.idea/
+.DS_Store

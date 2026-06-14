@@ -1,0 +1,1839 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Turnitin & Humanizer</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --r-sm:   10px;
+      --r-lg:   14px;
+      --r-xl:   18px;
+      --nav-h:  68px;
+      /* Выразительные easing-кривые (стандартные CSS слишком вялые) */
+      --ease-out:    cubic-bezier(0.23, 1, 0.32, 1);
+      --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+      /* Фирменный градиент — ТОЛЬКО для карточки баланса */
+      --g1: #6366f1; --g2: #8b5cf6; --g3: #d946ef;
+      --grad:   linear-gradient(135deg, var(--g1), var(--g2), var(--g3));
+      --grad-2: linear-gradient(135deg, var(--g1), var(--g2));
+    }
+    [data-theme="dark"] {
+      --bg:      #0a0a0c;   /* нейтральный почти-чёрный */
+      --bg2:     #111114;   /* инсет-фон внутри карточек */
+      --card:    #141418;   /* графитовая карточка */
+      --card-b:  rgba(255,255,255,0.07);
+      --card-b2: rgba(255,255,255,0.13);
+      --txt:     #f4f4f6;
+      --txt2:    #8b8b96;
+      --txt3:    #5b5b64;
+      --accent:    #4f46e5;                  /* индиго — единственный акцент */
+      --accent-2:  #a5b4fc;                  /* контрастный акцент для текста/иконок */
+      --accent-soft: rgba(99,102,241,0.12);
+      --accent-bd:   rgba(99,102,241,0.32);
+      --ok:   #34d399; --ok-bg:   rgba(16,185,129,.12);
+      --err:  #f87171; --err-bg:  rgba(239,68,68,.12);
+      --warn: #fbbf24; --warn-bg: rgba(245,158,11,.12);
+      --nav-bg:   rgba(12,12,15,0.92);
+      --toast-bg: rgba(22,22,27,.98);
+      --sheet-dim: rgba(0,0,0,.6);
+    }
+    [data-theme="light"] {
+      --bg:      #faf6ef;   /* тёплый кремовый */
+      --bg2:     #f1ece1;
+      --card:    #ffffff;
+      --card-b:  rgba(29,27,22,0.08);
+      --card-b2: rgba(29,27,22,0.16);
+      --txt:     #1d1b16;
+      --txt2:    #6f6a60;
+      --txt3:    #a39d90;
+      --accent:    #4f46e5;
+      --accent-2:  #4f46e5;                  /* на светлом сам индиго достаточно контрастен */
+      --accent-soft: rgba(79,70,229,0.10);
+      --accent-bd:   rgba(79,70,229,0.30);
+      --ok:   #047857; --ok-bg:   rgba(16,185,129,.13);
+      --err:  #dc2626; --err-bg:  rgba(239,68,68,.10);
+      --warn: #b45309; --warn-bg: rgba(245,158,11,.14);
+      --nav-bg:   rgba(250,246,239,0.92);
+      --toast-bg: rgba(255,255,255,.98);
+      --sheet-dim: rgba(29,27,22,.35);
+    }
+    [data-theme="light"] .tag-blue   { background: rgba(59,130,246,.12);  color: #1d4ed8; }
+    [data-theme="light"] .tag-green  { background: rgba(16,185,129,.14);  color: #047857; }
+    [data-theme="light"] .tag-red    { background: rgba(239,68,68,.12);   color: #dc2626; }
+    [data-theme="light"] .tag-yellow { background: rgba(245,158,11,.16);  color: #b45309; }
+    [data-theme="light"] .tag-gray   { background: rgba(107,114,128,.12); color: #4b5563; }
+    html, body { height: 100%; background: var(--bg); font-family: 'Plus Jakarta Sans', sans-serif; color: var(--txt); -webkit-font-smoothing: antialiased; transition: background-color .25s ease, color .25s ease; }
+    button { color: var(--txt); font-family: 'Plus Jakarta Sans', sans-serif; }
+    #root { height: 100%; display: flex; flex-direction: column; }
+    /* Тонкие иконки — премиальный минимализм */
+    #root svg { stroke-width: 1.6; }
+    .screen { flex: 1; overflow-y: auto; padding: 24px 20px calc(var(--nav-h) + 26px); }
+
+    /* Нижняя навигация: активная вкладка — «пилюля» с названием страницы */
+    .nav { position: fixed; bottom: 0; left: 0; right: 0; height: var(--nav-h); background: var(--nav-bg); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); border-top: 1px solid var(--card-b); display: flex; align-items: center; gap: 6px; padding: 0 12px; z-index: 100; }
+    .nav-btn { flex: 1; min-width: 0; height: 46px; display: flex; align-items: center; justify-content: center; gap: 7px; cursor: pointer; border: none; border-radius: 23px; background: transparent; color: var(--txt3); padding: 0; transition: flex-grow .25s var(--ease-out), background-color .25s var(--ease-out), color .25s var(--ease-out); }
+    .nav-btn svg { width: 21px; height: 21px; flex-shrink: 0; }
+    .nav-btn .nav-label { max-width: 0; opacity: 0; overflow: hidden; white-space: nowrap; font-size: 13px; font-weight: 700; transition: max-width .25s var(--ease-out), opacity .15s ease-out; }
+    .nav-btn.active { flex-grow: 2.4; background: var(--accent-soft); color: var(--accent-2); }
+    .nav-btn.active .nav-label { max-width: 96px; opacity: 1; transition: max-width .25s var(--ease-out), opacity .2s ease-out .06s; }
+    @media (prefers-reduced-motion: reduce) {
+      .nav-btn, .nav-btn .nav-label { transition: none; }
+    }
+
+    /* Заголовок-имя — акцентный текст (градиент остался только на карточке баланса) */
+    .grad { color: var(--accent-2); }
+
+    /* Buttons */
+    .btn { display: block; width: 100%; padding: 15px; border-radius: var(--r-lg); border: none; font-family: inherit; font-weight: 600; font-size: 15px; cursor: pointer; transition: background-color .18s ease, opacity .18s ease, transform 160ms var(--ease-out); }
+    .btn:active { transform: scale(0.97); }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:active { opacity: .92; }
+    .btn-secondary { background: transparent; color: var(--accent-2); border: 1px solid var(--accent-bd); }
+    .btn:disabled { opacity: .35; cursor: not-allowed; }
+
+    /* Cards */
+    .card { background: var(--card); border: 1px solid var(--card-b); border-radius: var(--r-xl); padding: 18px; margin-bottom: 12px; }
+    .svc-card { width: 100%; background: var(--card); border: 1px solid var(--card-b); border-radius: var(--r-xl); padding: 18px; margin-bottom: 10px; cursor: pointer; display: flex; align-items: center; gap: 14px; text-align: left; transition: border-color .18s ease, transform 160ms var(--ease-out); }
+    .svc-card:active { transform: scale(0.985); border-color: var(--card-b2); }
+
+    /* Check cards (Turnitin types) */
+    .check-card { width: 100%; background: var(--card); border: 1px solid var(--card-b); border-radius: var(--r-xl); padding: 18px; margin-bottom: 10px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; transition: border-color .18s ease, transform 160ms var(--ease-out); }
+    .check-card:active { transform: scale(0.985); border-color: var(--accent-bd); }
+    .check-card.disabled { opacity: .5; cursor: not-allowed; }
+
+    /* Balance card — фирменный градиент */
+    .bal-card { background: var(--grad); border-radius: var(--r-xl); padding: 22px 20px; margin-bottom: 14px; box-shadow: 0 10px 30px -10px rgba(124,58,237,.5); }
+    .bal-label { font-size: 11px; font-weight: 600; color: rgba(255,255,255,.85); text-transform: uppercase; letter-spacing: 1px; }
+    .bal-amount { font-size: 44px; font-weight: 800; line-height: 1.05; letter-spacing: -1.5px; margin: 8px 0 2px; color: #fff; }
+    .bal-sub { font-size: 13px; color: rgba(255,255,255,.8); }
+    .bal-tok { background: rgba(255,255,255,.16); border-radius: var(--r-lg); padding: 12px 14px; margin-top: 16px; display: flex; justify-content: space-between; align-items: center; color: #fff; }
+    .bal-tok svg { stroke: #fff; }
+
+    /* Topup amounts */
+    .topup-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+    .topup-btn { background: var(--card); border: 1px solid var(--card-b); border-radius: var(--r-lg); padding: 15px; cursor: pointer; text-align: center; font-weight: 700; font-size: 16px; color: var(--txt); transition: border-color .18s ease, transform 160ms var(--ease-out); }
+    .topup-btn:active { transform: scale(0.97); border-color: var(--accent-bd); }
+    .topup-custom { background: var(--card); border: 1px solid var(--card-b); border-radius: var(--r-lg); padding: 8px 8px 8px 16px; display: flex; gap: 10px; align-items: center; margin-bottom: 14px; }
+    .topup-custom input { flex: 1; background: none; border: none; outline: none; font-family: inherit; font-size: 16px; font-weight: 700; color: var(--txt); }
+    .topup-custom input::placeholder { color: var(--txt2); font-weight: 500; }
+
+    /* Token packages */
+    .pkg-card { background: var(--card); border: 1px solid var(--card-b); border-radius: var(--r-xl); padding: 18px; margin-bottom: 10px; cursor: pointer; transition: border-color .18s ease, transform 160ms var(--ease-out); }
+    .pkg-card:active { transform: scale(0.985); border-color: var(--card-b2); }
+    .pkg-card.pop { border-color: var(--accent-bd); }
+    .pkg-card.disabled { opacity: .5; cursor: not-allowed; }
+    .pkg-badge { background: var(--accent); color: #fff; font-size: 10px; font-weight: 700; letter-spacing: .3px; text-transform: uppercase; padding: 3px 9px; border-radius: 6px; display: inline-block; margin-bottom: 8px; }
+
+    /* Humanizer */
+    .pill-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+    .pill { background: transparent; border: 1px solid var(--card-b); border-radius: 10px; padding: 8px 14px; font-size: 13px; font-weight: 600; color: var(--txt2); cursor: pointer; transition: background-color .15s ease, border-color .15s ease, color .15s ease; }
+    .pill.on { background: var(--accent-soft); border-color: var(--accent-bd); color: var(--accent-2); }
+    .toggle { width: 44px; height: 26px; border-radius: 13px; background: var(--bg2); border: 1px solid var(--card-b); cursor: pointer; position: relative; transition: background .2s; flex-shrink: 0; }
+    .toggle.on { background: var(--accent); border-color: var(--accent); }
+    .toggle::after { content: ''; position: absolute; width: 18px; height: 18px; border-radius: 50%; background: #fff; top: 3px; left: 3px; transition: transform .2s; }
+    .toggle.on::after { transform: translateX(18px); }
+    .textarea { width: 100%; background: var(--bg2); border: 1px solid var(--card-b); border-radius: var(--r-lg); padding: 14px; font-family: inherit; font-size: 14px; line-height: 1.55; color: var(--txt); resize: none; min-height: 140px; outline: none; transition: border-color .18s; }
+    .textarea:focus { border-color: var(--accent-bd); }
+    .textarea::placeholder { color: var(--txt3); }
+    .result-box { background: var(--bg2); border: 1px solid var(--card-b); border-radius: var(--r-lg); padding: 14px; font-size: 14px; line-height: 1.6; max-height: 280px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+    .file-btn { background: var(--bg2); border: 1px dashed var(--card-b2); border-radius: var(--r-lg); padding: 14px 16px; display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 14px; font-weight: 600; color: var(--txt2); margin-bottom: 10px; width: 100%; transition: border-color .18s ease, color .18s ease, transform 160ms var(--ease-out); }
+    .file-btn:active { transform: scale(0.98); }
+    /* hover только на устройствах с курсором — на таче тап ложно «зависает» в hover */
+    @media (hover: hover) and (pointer: fine) {
+      .file-btn:hover { border-color: var(--accent-bd); color: var(--accent-2); }
+    }
+    .file-btn svg { width: 18px; height: 18px; flex-shrink: 0; }
+
+    /* Orders */
+    .order-row { background: var(--card); border: 1px solid var(--card-b); border-radius: var(--r-lg); padding: 13px 14px; margin-bottom: 8px; display: flex; align-items: center; gap: 12px; }
+    .order-row svg { width: 16px; height: 16px; }
+    .order-id { font-size: 11px; color: var(--txt2); }
+    .order-meta { font-size: 12px; color: var(--txt2); margin-top: 2px; }
+    .row-ico { width: 36px; height: 36px; background: var(--bg2); border: 1px solid var(--card-b); border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: var(--txt2); }
+
+    /* Tag */
+    .tag { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 6px; display: inline-block; }
+    .tag-blue   { background: rgba(59,130,246,.13);  color: #60a5fa; }
+    .tag-green  { background: rgba(16,185,129,.13);  color: #34d399; }
+    .tag-red    { background: rgba(239,68,68,.13);   color: #f87171; }
+    .tag-yellow { background: rgba(245,158,11,.13);  color: #fbbf24; }
+    .tag-gray   { background: rgba(107,114,128,.12); color: #9ca3af; }
+
+    /* Admin */
+    .adm-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+    .adm-tile { background: var(--card); border: 1px solid var(--card-b); border-radius: var(--r-xl); padding: 14px 12px; cursor: pointer; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; transition: border-color .18s; color: var(--txt); }
+    .adm-tile:active { border-color: var(--accent-bd); transform: scale(0.97); }
+    .adm-tile-icon { width: 38px; height: 38px; border-radius: 10px; background: var(--accent-soft); display: flex; align-items: center; justify-content: center; color: var(--accent-2); flex-shrink: 0; }
+    .adm-tile-icon svg { width: 18px; height: 18px; }
+    .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+    .stat-box { background: var(--card); border: 1px solid var(--card-b); border-radius: var(--r-lg); padding: 14px; text-align: center; }
+    .stat-num { font-size: 28px; font-weight: 900; }
+    .stat-lbl { font-size: 11px; color: var(--txt2); margin-top: 2px; }
+    .adm-row { display: flex; gap: 8px; margin-bottom: 10px; align-items: center; }
+    .adm-input { flex: 1; background: var(--bg2); border: 1px solid var(--card-b); border-radius: var(--r-sm); padding: 11px 13px; font-family: inherit; font-size: 14px; color: var(--txt); outline: none; transition: border-color .18s; }
+    .adm-input:focus { border-color: var(--accent-bd); }
+    .btn-sm { padding: 10px 15px; border-radius: var(--r-sm); border: 1px solid transparent; font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: transform 140ms var(--ease-out); }
+    .btn-sm:active { transform: scale(0.95); }
+    .btn-sm-blue  { background: var(--accent-soft); color: var(--accent-2); border-color: var(--accent-bd); }
+    .btn-sm-green { background: var(--ok-bg);  color: var(--ok); }
+    .btn-sm-red   { background: var(--err-bg); color: var(--err); }
+    .btn-sm-gray  { background: var(--bg2); color: var(--txt2); border-color: var(--card-b); }
+    .back-btn { background: none; border: none; color: var(--txt2); font-size: 14px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 4px; padding: 0; margin-bottom: 16px; }
+    .back-btn svg { width: 18px; height: 18px; }
+    .price-row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+    .price-label { font-size: 14px; color: var(--txt2); min-width: 140px; }
+    .setting-row { margin-bottom: 12px; }
+    .setting-label { font-size: 12px; color: var(--txt2); margin-bottom: 4px; }
+
+    /* Misc */
+    .copy-btn { background: var(--bg2); border: 1px solid var(--card-b); border-radius: var(--r-sm); padding: 8px 13px; font-size: 12px; font-weight: 600; color: var(--txt2); cursor: pointer; margin-top: 8px; display: inline-flex; align-items: center; gap: 6px; }
+    .copy-btn svg { width: 14px; height: 14px; }
+    .spinner { width: 30px; height: 30px; border: 2.5px solid var(--card-b); border-top-color: var(--accent-2); border-radius: 50%; animation: spin .8s linear infinite; margin: 40px auto; }
+    .spinner-sm { width: 16px; height: 16px; border: 2px solid rgba(255,255,255,.25); border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; display: inline-block; vertical-align: -2px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .toast { position: fixed; top: 18px; left: 50%; transform: translateX(-50%); background: var(--toast-bg); border: 1px solid var(--card-b2); color: var(--txt); padding: 11px 20px; border-radius: 12px; font-size: 14px; font-weight: 600; z-index: 999; pointer-events: none; box-shadow: 0 8px 28px rgba(0,0,0,.25); max-width: 88%; text-align: center; }
+    .empty { text-align: center; color: var(--txt3); padding: 36px 16px; font-size: 14px; }
+    .sec-title { font-size: 11px; font-weight: 700; color: var(--txt3); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; margin-top: 4px; display: flex; align-items: center; gap: 7px; }
+    .sec-title svg { width: 14px; height: 14px; }
+    h2 { font-size: 25px; font-weight: 800; letter-spacing: -0.5px; margin-bottom: 4px; }
+    h3 { font-size: 16px; font-weight: 700; margin-bottom: 10px; }
+    p  { font-size: 13px; color: var(--txt2); line-height: 1.55; }
+    a  { color: var(--accent-2); text-decoration: none; }
+    .insufficient { border-color: var(--err) !important; opacity: .85; }
+    .cleanup-box { background: var(--err-bg); border: 1px solid rgba(239,68,68,.22); border-radius: var(--r-lg); padding: 16px; margin-bottom: 14px; }
+    .ico-badge { width: 64px; height: 64px; border-radius: 18px; background: var(--accent); display: flex; align-items: center; justify-content: center; color: #fff; margin: 0 auto 16px; }
+    .ico-badge svg { width: 30px; height: 30px; }
+
+    /* Theme toggle */
+    .theme-btn { width: 38px; height: 38px; border-radius: 50%; border: 1px solid var(--card-b); background: var(--card); color: var(--txt2); display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; transition: transform 160ms var(--ease-out), border-color .18s ease; }
+    .theme-btn:active { transform: scale(0.92); }
+    .theme-btn svg { width: 18px; height: 18px; }
+
+    /* Поиск в каталоге аренды */
+    .search-row { background: var(--card); border: 1px solid var(--card-b); border-radius: var(--r-lg); padding: 0 14px; display: flex; align-items: center; gap: 10px; margin-bottom: 14px; color: var(--txt3); }
+    .search-row input { flex: 1; background: none; border: none; outline: none; font-family: inherit; font-size: 14px; color: var(--txt); padding: 13px 0; }
+    .search-row input::placeholder { color: var(--txt3); }
+    .search-row svg { width: 17px; height: 17px; flex-shrink: 0; }
+
+    /* Карточка сервиса аренды */
+    .rent-ico { width: 46px; height: 46px; border-radius: 13px; background: var(--accent-soft); display: flex; align-items: center; justify-content: center; font-size: 22px; flex-shrink: 0; color: var(--accent-2); }
+    .avail { font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; display: inline-flex; align-items: center; gap: 5px; }
+    .avail::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .avail-on  { background: var(--ok-bg);  color: var(--ok); }
+    .avail-off { background: var(--bg2); color: var(--txt3); }
+    .avail-wait{ background: var(--warn-bg); color: var(--warn); }
+
+    /* Bottom-sheet (выбор тарифа / креды) */
+    .sheet-dim { position: fixed; inset: 0; background: var(--sheet-dim); z-index: 200; opacity: 0; transition: opacity .25s ease-out; }
+    .sheet-dim.open { opacity: 1; }
+    .sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 201; background: var(--card); border-radius: 22px 22px 0 0; border-top: 1px solid var(--card-b); padding: 10px 20px calc(22px + env(safe-area-inset-bottom)); transform: translateY(100%); transition: transform .3s var(--ease-drawer); max-height: 86vh; overflow-y: auto; }
+    .sheet.open { transform: translateY(0); }
+    .sheet-grip { width: 38px; height: 4px; border-radius: 2px; background: var(--card-b2); margin: 4px auto 16px; }
+    @media (prefers-reduced-motion: reduce) {
+      .sheet { transition: opacity .2s ease; }
+    }
+
+    /* Тариф в шите */
+    .tariff-btn { width: 100%; display: flex; justify-content: space-between; align-items: center; background: transparent; border: 1px solid var(--card-b); border-radius: var(--r-lg); padding: 14px 16px; margin-bottom: 8px; cursor: pointer; color: var(--txt); transition: border-color .15s ease, background-color .15s ease, transform 160ms var(--ease-out); }
+    .tariff-btn:active { transform: scale(0.98); }
+    .tariff-btn.on { background: var(--accent-soft); border-color: var(--accent-bd); }
+
+    /* Креды выданного аккаунта */
+    .cred-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; background: var(--bg2); border: 1px solid var(--card-b); border-radius: var(--r-lg); padding: 12px 14px; margin-bottom: 8px; }
+    .cred-val { font-size: 14px; font-weight: 700; word-break: break-all; }
+    .cred-lbl { font-size: 11px; color: var(--txt2); margin-bottom: 2px; }
+
+    /* Таймер активной аренды */
+    .countdown { font-variant-numeric: tabular-nums; font-weight: 800; color: var(--accent-2); }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+  // Тема до рендера React — никакого мигания. Приоритет: выбор юзера → тема Telegram.
+  (function () {
+    var saved = null;
+    try { saved = localStorage.getItem('theme'); } catch (e) {}
+    var tgScheme = window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.colorScheme;
+    document.documentElement.dataset.theme =
+      (saved === 'light' || saved === 'dark') ? saved : (tgScheme === 'light' ? 'light' : 'dark');
+  })();
+</script>
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+const tg = window.Telegram?.WebApp;
+
+// ── SVG Icons ────────────────────────────────────────────────────────────────
+const ICONS = {
+  home:    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>,
+  scan:    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/></svg>,
+  wand:    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 4V2m0 14v-2M8 9H2m14 0h-2m-2.586-4.828L9.172 5.586M18.828 18.828l-2.242-2.242M9.172 18.828 7.93 17.586M18.828 9.172 17.586 7.93"/><circle cx="15" cy="9" r="3"/></svg>,
+  user:    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>,
+  shield:  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>,
+  wallet:  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="1" y="4" width="22" height="16" rx="2"/><path d="M1 10h22"/><circle cx="17" cy="15" r="1.5" fill="currentColor"/></svg>,
+  arrow:   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6"/></svg>,
+  back:    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6"/></svg>,
+  plus:    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>,
+  copy:    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>,
+  file:    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>,
+  trash:   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6m4-6v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>,
+  ban:     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>,
+  gear:    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
+  users:   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+  gift:    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="20 12 20 22 4 22 4 12"/><rect x="2" y="7" width="20" height="5" rx="1"/><path d="M12 22V7"/><path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7z"/><path d="M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/></svg>,
+  inbox:   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>,
+  money:   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>,
+  search:  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>,
+  clean:   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>,
+  zap:     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>,
+  clock:   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>,
+  check:   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>,
+  checkc:  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>,
+  spark:   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"><path d="M12 3l1.9 5.6L19.5 10l-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.4L12 3z"/></svg>,
+  cpu:     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>,
+  coins:   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><ellipse cx="9" cy="7" rx="6" ry="3"/><path d="M3 7v5c0 1.66 2.69 3 6 3s6-1.34 6-3V7"/><path d="M9 15v2c0 1.66 2.69 3 6 3s6-1.34 6-3v-5c0-1.3-1.65-2.4-3.95-2.82"/></svg>,
+  card:    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/><line x1="6" y1="15" x2="10" y2="15"/></svg>,
+  info:    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16"/><circle cx="12" cy="8" r="0.6" fill="currentColor" stroke="none"/></svg>,
+  key:     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>,
+  sun:     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>,
+  moon:    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>,
+  bell:    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>,
+};
+
+// Иконка как inline-элемент нужного размера/цвета
+const Icon = ({ name, size = 16, color, stroke, style }) =>
+  ICONS[name] ? React.cloneElement(ICONS[name], {
+    width: size, height: size,
+    ...(color ? { stroke: color } : {}),
+    ...(stroke ? { stroke } : {}),
+    style: { flexShrink: 0, ...(style || {}) },
+  }) : null;
+
+// ── Брендовые логотипы сервисов аренды ───────────────────────────────────────
+// Официальные SVG (Simple Icons / svgl). В rental_services.icon хранится ключ
+// отсюда ('openai', 'claude'...) ЛИБО эмодзи — RentIcon разрулит сам.
+// fill 'currentColor' = монохромные логотипы адаптируются к теме.
+const BRANDS = {
+  openai: { vb:'0 0 256 260', fill:'currentColor', parts:[{d:'M239.184 106.203a64.716 64.716 0 0 0-5.576-53.103C219.452 28.459 191 15.784 163.213 21.74A65.586 65.586 0 0 0 52.096 45.22a64.716 64.716 0 0 0-43.23 31.36c-14.31 24.602-11.061 55.634 8.033 76.74a64.665 64.665 0 0 0 5.525 53.102c14.174 24.65 42.644 37.324 70.446 31.36a64.72 64.72 0 0 0 48.754 21.744c28.481.025 53.714-18.361 62.414-45.481a64.767 64.767 0 0 0 43.229-31.36c14.137-24.558 10.875-55.423-8.083-76.483Zm-97.56 136.338a48.397 48.397 0 0 1-31.105-11.255l1.535-.87 51.67-29.825a8.595 8.595 0 0 0 4.247-7.367v-72.85l21.845 12.636c.218.111.37.32.409.563v60.367c-.056 26.818-21.783 48.545-48.601 48.601Zm-104.466-44.61a48.345 48.345 0 0 1-5.781-32.589l1.534.921 51.722 29.826a8.339 8.339 0 0 0 8.441 0l63.181-36.425v25.221a.87.87 0 0 1-.358.665l-52.335 30.184c-23.257 13.398-52.97 5.431-66.404-17.803ZM23.549 85.38a48.499 48.499 0 0 1 25.58-21.333v61.39a8.288 8.288 0 0 0 4.195 7.316l62.874 36.272-21.845 12.636a.819.819 0 0 1-.767 0L41.353 151.53c-23.211-13.454-31.171-43.144-17.804-66.405v.256Zm179.466 41.695-63.08-36.63L161.73 77.86a.819.819 0 0 1 .768 0l52.233 30.184a48.6 48.6 0 0 1-7.316 87.635v-61.391a8.544 8.544 0 0 0-4.4-7.213Zm21.742-32.69-1.535-.922-51.619-30.081a8.39 8.39 0 0 0-8.492 0L99.98 99.808V74.587a.716.716 0 0 1 .307-.665l52.233-30.133a48.652 48.652 0 0 1 72.236 50.391v.205ZM88.061 139.097l-21.845-12.585a.87.87 0 0 1-.41-.614V65.685a48.652 48.652 0 0 1 79.757-37.346l-1.535.87-51.67 29.825a8.595 8.595 0 0 0-4.246 7.367l-.051 72.697Zm11.868-25.58 28.138-16.217 28.188 16.218v32.434l-28.086 16.218-28.188-16.218-.052-32.434Z'}] },
+  claude: { vb:'0 0 24 24', fill:'#D97757', parts:[{d:'m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z'}] },
+  grok: { vb:'0 0 1024 1024', fill:'currentColor', parts:[{d:'M395.479 633.828L735.91 381.105C752.599 368.715 776.454 373.548 784.406 392.792C826.26 494.285 807.561 616.253 724.288 699.996C641.016 783.739 525.151 802.104 419.247 760.277L303.556 814.143C469.49 928.202 670.987 899.995 796.901 773.282C896.776 672.843 927.708 535.937 898.785 412.476L899.047 412.739C857.105 231.37 909.358 158.874 1016.4 10.6326C1018.93 7.11771 1021.47 3.60279 1024 0L883.144 141.651V141.212L395.392 633.916'},{d:'M325.226 695.251C206.128 580.84 226.662 403.776 328.285 301.668C403.431 226.097 526.549 195.254 634.026 240.596L749.454 186.994C728.657 171.88 702.007 155.623 671.424 144.2C533.19 86.9942 367.693 115.465 255.323 228.382C147.234 337.081 113.244 504.215 171.613 646.833C215.216 753.423 143.739 828.818 71.7385 904.916C46.2237 931.893 20.6216 958.87 0 987.429L325.139 695.339'}] },
+  perplexity: { vb:'0 0 24 24', fill:'#1FB8CD', parts:[{d:'M22.3977 7.0896h-2.3106V.0676l-7.5094 6.3542V.1577h-1.1554v6.1966L4.4904 0v7.0896H1.6023v10.3976h2.8882V24l6.932-6.3591v6.2005h1.1554v-6.0469l6.9318 6.1807v-6.4879h2.8882V7.0896zm-3.4657-4.531v4.531h-5.355l5.355-4.531zm-13.2862.0676 4.8691 4.4634H5.6458V2.6262zM2.7576 16.332V8.245h7.8476l-6.1149 6.1147v1.9723H2.7576zm2.8882 5.0404v-3.8852h.0001v-2.6488l5.7763-5.7764v7.0111l-5.7764 5.2993zm12.7086.0248-5.7766-5.1509V9.0618l5.7766 5.7766v6.5588zm2.8882-5.0652h-1.733v-1.9723L13.3948 8.245h7.8478v8.087z'}] },
+  gemini: { vb:'0 0 24 24', fill:'#8E75B2', parts:[{d:'M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81'}] },
+  figma: { vb:'0 0 24 24', fill:'#F24E1E', parts:[{d:'M15.852 8.981h-4.588V0h4.588c2.476 0 4.49 2.014 4.49 4.49s-2.014 4.491-4.49 4.491zM12.735 7.51h3.117c1.665 0 3.019-1.355 3.019-3.019s-1.355-3.019-3.019-3.019h-3.117V7.51zm0 1.471H8.148c-2.476 0-4.49-2.014-4.49-4.49S5.672 0 8.148 0h4.588v8.981zm-4.587-7.51c-1.665 0-3.019 1.355-3.019 3.019s1.354 3.02 3.019 3.02h3.117V1.471H8.148zm4.587 15.019H8.148c-2.476 0-4.49-2.014-4.49-4.49s2.014-4.49 4.49-4.49h4.588v8.98zM8.148 8.981c-1.665 0-3.019 1.355-3.019 3.019s1.355 3.019 3.019 3.019h3.117V8.981H8.148zM8.172 24c-2.489 0-4.515-2.014-4.515-4.49s2.014-4.49 4.49-4.49h4.588v4.441c0 2.503-2.047 4.539-4.563 4.539zm-.024-7.51a3.023 3.023 0 0 0-3.019 3.019c0 1.665 1.365 3.019 3.044 3.019 1.705 0 3.093-1.376 3.093-3.068v-2.97H8.148zm7.704 0h-.098c-2.476 0-4.49-2.014-4.49-4.49s2.014-4.49 4.49-4.49h.098c2.476 0 4.49 2.014 4.49 4.49s-2.014 4.49-4.49 4.49zm-.097-7.509c-1.665 0-3.019 1.355-3.019 3.019s1.355 3.019 3.019 3.019h.098c1.665 0 3.019-1.355 3.019-3.019s-1.355-3.019-3.019-3.019h-.098z'}] },
+  netflix: { vb:'0 0 24 24', fill:'#E50914', parts:[{d:'m5.398 0 8.348 23.602c2.346.059 4.856.398 4.856.398L10.113 0H5.398zm8.489 0v9.172l4.715 13.33V0h-4.715zM5.398 1.5V24c1.873-.225 2.81-.312 4.715-.398V14.83L5.398 1.5z'}] },
+  notion: { vb:'0 0 24 24', fill:'currentColor', parts:[{d:'M4.459 4.208c.746.606 1.026.56 2.428.466l13.215-.793c.28 0 .047-.28-.046-.326L17.86 1.968c-.42-.326-.981-.7-2.055-.607L3.01 2.295c-.466.046-.56.28-.374.466zm.793 3.08v13.904c0 .747.373 1.027 1.214.98l14.523-.84c.841-.046.935-.56.935-1.167V6.354c0-.606-.233-.933-.748-.887l-15.177.887c-.56.047-.747.327-.747.933zm14.337.745c.093.42 0 .84-.42.888l-.7.14v10.264c-.608.327-1.168.514-1.635.514-.748 0-.935-.234-1.495-.933l-4.577-7.186v6.952L12.21 19s0 .84-1.168.84l-3.222.186c-.093-.186 0-.653.327-.746l.84-.233V9.854L7.822 9.76c-.094-.42.14-1.026.793-1.073l3.456-.233 4.764 7.279v-6.44l-1.215-.139c-.093-.514.28-.887.747-.933zM1.936 1.035l13.31-.98c1.634-.14 2.055-.047 3.082.7l4.249 2.986c.7.513.934.653.934 1.213v16.378c0 1.026-.373 1.634-1.68 1.726l-15.458.934c-.98.047-1.448-.093-1.962-.747l-3.129-4.06c-.56-.747-.793-1.306-.793-1.96V2.667c0-.839.374-1.54 1.447-1.632z'}] },
+  microsoft: { vb:'0 0 256 256', parts:[{d:'M121.666 121.666H0V0h121.666z',fill:'#F1511B'},{d:'M256 121.666H134.335V0H256z',fill:'#80CC28'},{d:'M121.663 256.002H0V134.336h121.663z',fill:'#00ADEF'},{d:'M256 256.002H134.335V134.336H256z',fill:'#FBBC09'}] },
+  canva: { vb:'0 0 80 80', parts:[{d:'M40 80C62.0914 80 80 62.0914 80 40C80 17.9086 62.0914 0 40 0C17.9086 0 0 17.9086 0 40C0 62.0914 17.9086 80 40 80Z',fill:'#7D2AE7'},{d:'M57.2691 48.2052C56.939 48.2052 56.6485 48.484 56.3462 49.0928C52.9323 56.0153 47.0358 60.9134 40.2125 60.9134C32.3228 60.9134 27.437 53.7913 27.437 43.9522C27.437 27.2855 36.7232 17.6491 44.8796 17.6491C48.691 17.6491 51.0186 20.0443 51.0186 23.8559C51.0186 28.3796 48.4485 30.7748 48.4485 32.3702C48.4485 33.0864 48.8939 33.5201 49.7773 33.5201C53.3264 33.5201 57.4918 29.4419 57.4918 23.6808C57.4918 18.0947 52.63 13.9888 44.4737 13.9888C30.994 13.9888 19.0142 26.4858 19.0142 43.777C19.0142 57.1614 26.6572 66.0061 38.45 66.0061C50.9668 66.0061 58.2043 53.5526 58.2043 49.5105C58.2043 48.6153 57.7466 48.2052 57.2691 48.2052Z',fill:'#fff'}] },
+  midjourney: { vb:'0 0 698 583', fill:'currentColor', stroke:36, parts:[{d:'M9 573.5C29 573.5 59 531.5 94 525.5C114 525.5 129 567.5 179 573.5C214 573.5 229 531.5 264 531.5C299 531.5 314 573.5 349 573.5C384 573.5 399 531.5 434 531.5C469 531.5 484 573.5 519 573.5C554 573.5 569 531.5 604 531.5C639 531.5 654 573.5 689 573.5'},{d:'M77.4 531.7L54.5 487.9L644.5 449.9C598.1 492.1 538.5 526.3 478.2 554.3'},{d:'M289.4 79.9004C389.8 110.6 530.2 258.9 578 418.3C551.8 408 532.2 397.5 495.4 406.9C459.8 277.4 396.1 153.7 289.4 79.9004Z'},{d:'M102.7 9.00049C231.3 64.0005 407.7 217.1 440.1 421C291.8 361.2 178.9 393.1 100.3 441.6C220.2 289.2 166.4 115.9 102.7 9.00049Z'}] },
+};
+
+// Иконка сервиса аренды: ключ из BRANDS → официальный логотип, иначе эмодзи/буква
+function RentIcon({ icon, size = 24 }) {
+  const b = BRANDS[icon];
+  if (!b) return <span style={{fontSize:size*0.92,lineHeight:1}}>{icon || '🔑'}</span>;
+  return (
+    <svg viewBox={b.vb} width={size} height={size} style={{flexShrink:0,color:'var(--txt)'}} aria-hidden="true">
+      {b.parts.map((p,i) => b.stroke
+        ? <path key={i} d={p.d} fill="none" stroke={p.fill||b.fill} strokeWidth={b.stroke} strokeLinecap="round" strokeLinejoin="round"/>
+        : <path key={i} d={p.d} fill={p.fill||b.fill}/>)}
+    </svg>
+  );
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+async function api(path, opts = {}) {
+  const initData = tg?.initData || '';
+  const res = await fetch(path, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData, ...(opts.headers||{}) },
+  });
+  if (!res.ok) { const e = await res.json().catch(() => ({ detail: res.statusText })); throw new Error(e.detail || 'Error'); }
+  return res.json();
+}
+
+function fmt(n) { return Number(n || 0).toLocaleString('ru-RU'); }
+function fmtT(n) { return (Number(n || 0)).toFixed(1); }
+
+function statusTag(s) {
+  const map = { pending:['Ожидание','tag-yellow'], queued:['В очереди','tag-yellow'], awaiting_file:['Ждём файл','tag-yellow'], ready:['Готов к проверке','tag-blue'], processing:['В процессе','tag-blue'], paid:['Оплачено','tag-blue'], done:['Готово','tag-green'], error:['Ошибка','tag-red'], cancelled:['Отменён','tag-gray'], active:['Активна','tag-green'], expired:['Завершена','tag-gray'] };
+  const [l,c] = map[s] || [s,'tag-gray'];
+  return <span className={`tag ${c}`}>{l}</span>;
+}
+
+// «6 ч» / «неделя» / «месяц» / «год»
+function durationLabel(h) {
+  const map = { 24:'сутки', 168:'неделя', 336:'2 недели', 720:'месяц', 2160:'3 месяца', 4320:'полгода', 8760:'год' };
+  return map[h] || `${h} ч`;
+}
+
+// Сервер шлёт naive-UTC isoformat — дробную часть отрезаем, 'Z' обязателен,
+// иначе таймер уедет на локальный сдвиг (+5ч в Казахстане).
+function parseUTC(s) { return new Date(String(s).split('.')[0] + 'Z'); }
+
+function Countdown({ expiresAt }) {
+  const [left, setLeft] = useState(() => parseUTC(expiresAt) - Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setLeft(parseUTC(expiresAt) - Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [expiresAt]);
+  if (left <= 0) return <span className="countdown">0:00</span>;
+  const s = Math.floor(left / 1000), d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const txt = d > 0 ? `${d} д ${h} ч` : h > 0 ? `${h} ч ${m} мин` : `${m}:${String(sec).padStart(2,'0')}`;
+  return <span className="countdown">{txt}</span>;
+}
+
+function ThemeToggle() {
+  const [theme, setTheme] = useState(document.documentElement.dataset.theme || 'dark');
+  const flip = () => {
+    const next = theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem('theme', next); } catch (e) {}
+    try {
+      const bg = next === 'light' ? '#faf6ef' : '#0a0a0c';
+      tg?.setHeaderColor?.(bg); tg?.setBackgroundColor?.(bg);
+    } catch (e) {}
+    setTheme(next);
+  };
+  return (
+    <button className="theme-btn" onClick={flip} aria-label="Сменить тему">
+      {ICONS[theme === 'dark' ? 'sun' : 'moon']}
+    </button>
+  );
+}
+
+function useToast() {
+  const [t, setT] = useState(null);
+  const show = m => { setT(m); setTimeout(() => setT(null), 2400); };
+  return [t, show];
+}
+const Toast = ({ msg }) => msg ? <div className="toast">{msg}</div> : null;
+const Spinner = () => <div className="spinner"/>;
+
+// ── HomeScreen ───────────────────────────────────────────────────────────────
+function HomeScreen({ user, orders, onNav }) {
+  const recent = (orders || []).slice(0, 3);
+  const TYPE_ICON = { sim:'scan', similarity:'scan', ai:'cpu', both:'scan' };
+  return (
+    <div className="screen">
+      <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:12,marginBottom:20}}>
+        <div>
+          <p style={{color:'var(--txt2)',fontSize:13}}>Добро пожаловать,</p>
+          <h2 className="grad">{user?.full_name || user?.username || 'Пользователь'}</h2>
+        </div>
+        <ThemeToggle/>
+      </div>
+
+      <div className="bal-card">
+        <div className="bal-label">Баланс</div>
+        <div className="bal-amount">{fmt(user?.tenge_balance)} ₸</div>
+        <div className="bal-sub">Используется для всех сервисов</div>
+        <div className="bal-tok">
+          <span style={{fontSize:13,fontWeight:600,display:'flex',alignItems:'center',gap:7}}><Icon name="coins" size={15} color="var(--accent-2)"/> Токены Хуманайзера</span>
+          <span style={{fontSize:16,fontWeight:800}}>{fmtT(user?.token_balance)}</span>
+        </div>
+      </div>
+
+      <div className="sec-title">Сервисы</div>
+      {[
+        { nav:'turnitin',  icon:'scan', title:'Turnitin',   sub:'Плагиат и AI-детекция' },
+        { nav:'humanizer', icon:'wand', title:'Хуманайзер', sub:'AI-текст в человеческий' },
+        { nav:'rental',    icon:'key',  title:'Аренда ИИ',  sub:'ChatGPT, Claude и другие' },
+      ].map(s => (
+        <button key={s.nav} className="svc-card" onClick={() => onNav(s.nav)}>
+          <div style={{width:44,height:44,background:'var(--accent-soft)',borderRadius:12,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,color:'var(--accent-2)'}}>
+            {React.cloneElement(ICONS[s.icon], {width:20,height:20})}
+          </div>
+          <div>
+            <div style={{fontWeight:700,fontSize:16}}>{s.title}</div>
+            <div style={{fontSize:13,color:'var(--txt2)',marginTop:2}}>{s.sub}</div>
+          </div>
+          <div style={{marginLeft:'auto',color:'var(--txt3)'}}>{React.cloneElement(ICONS.arrow,{width:18,height:18})}</div>
+        </button>
+      ))}
+
+      {recent.length > 0 && <>
+        <div className="sec-title" style={{marginTop:8}}>Последние заказы</div>
+        {recent.map(o => (
+          <div key={o.id} className="order-row">
+            <div className="row-ico">
+              {React.cloneElement(ICONS[TYPE_ICON[o.report_type]||'scan'],{width:16,height:16})}
+            </div>
+            <div style={{flex:1}}>
+              <div style={{fontWeight:600,fontSize:14}}>#{o.id} · {o.report_type?.toUpperCase()}</div>
+              <div className="order-meta">{(o.created_at||'').slice(0,10)}</div>
+            </div>
+            {statusTag(o.status)}
+          </div>
+        ))}
+      </>}
+    </div>
+  );
+}
+
+// ── TurnitinScreen ───────────────────────────────────────────────────────────
+function TurnitinScreen({ user, prices, premiumMult, onNav, onBalanceUpdate }) {
+  const [toast, showToast] = useToast();
+  const [loading, setLoading] = useState(false);
+  const [success, setSuccess] = useState(null); // { order_id, is_premium }
+  const [premium, setPremium] = useState(false);
+  // Ключ идемпотентности: один на попытку заказа. Сохраняется при ретраях того
+  // же заказа (двойной тап / потеря ответа) — сервер не спишет дважды.
+  const reqIdRef = useRef(null);
+  const mult = Number(premiumMult || 1.5);
+  const checks = [
+    { type:'sim',  label:'Плагиат',     sub:'Similarity report',  priceKey:'price_sim'  },
+    { type:'ai',   label:'AI-детекция', sub:'AI Writing report',  priceKey:'price_ai'   },
+    { type:'both', label:'Оба отчёта',  sub:'Sim + AI (выгоднее)',priceKey:'price_both' },
+  ];
+  const priceFor = (key) => {
+    const base = prices?.[key] || 0;
+    return premium ? Math.round(base * mult) : base;
+  };
+
+  const choose = async (type, price) => {
+    const balance = Number(user?.tenge_balance || 0);
+    const isWl    = user?.is_whitelisted;
+    if (!isWl && balance < price) {
+      showToast(`Нужно ${fmt(price)} ₸, у вас ${fmt(balance)} ₸`);
+      setTimeout(() => onNav('wallet'), 1200);
+      return;
+    }
+    if (loading) return;               // защита от двойного тапа
+    setLoading(true);
+    if (!reqIdRef.current) {
+      reqIdRef.current = (crypto.randomUUID && crypto.randomUUID()) ||
+        (Date.now() + '-' + Math.random().toString(36).slice(2));
+    }
+    try {
+      const res = await api('/api/order', { method:'POST', body: JSON.stringify({ report_type: type, is_premium: premium, request_id: reqIdRef.current }) });
+      reqIdRef.current = null;         // успех — следующий заказ получит новый ключ
+      setSuccess({ order_id: res.order_id, is_premium: res.is_premium });
+      onBalanceUpdate && onBalanceUpdate({ tenge_balance: res.balance });
+    } catch(e) {
+      showToast(e.message);    // ключ сохраняем: ретрай дедуплицируется
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (success) return (
+    <div className="screen" style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:'60vh',textAlign:'center'}}>
+      <div className="ico-badge">{React.cloneElement(ICONS[success.is_premium ? 'zap' : 'checkc'],{width:30,height:30})}</div>
+      <h2 style={{marginBottom:8}}>Заказ #{success.order_id} создан</h2>
+      <p style={{marginBottom:24,maxWidth:300}}>
+        {success.is_premium
+          ? <>Премиум-очередь — мы <b>сейчас же</b> попросим файл в чате бота. У вас будет <b>3 минуты</b> на отправку.</>
+          : <>Место в очереди забронировано. Когда подойдёт очередь, бот попросит файл — на отправку даётся <b>3 минуты</b>.</>}
+        <br/><br/>Форматы: .pdf · .docx · .doc · .txt · .rtf
+      </p>
+      <button className="btn btn-primary" style={{width:'auto',padding:'12px 32px'}} onClick={() => setSuccess(null)}>
+        Создать ещё
+      </button>
+    </div>
+  );
+
+  return (
+    <div className="screen">
+      <Toast msg={toast}/>
+      <button className="back-btn" onClick={() => onNav('home')}>{ICONS.back} Назад</button>
+      <h2 style={{marginBottom:4}}>Turnitin</h2>
+      <p style={{marginBottom:16}}>Проверка на плагиат и AI-контент</p>
+
+      <div className="sec-title">Очередь</div>
+      <div style={{display:'flex',gap:10,marginBottom:22}}>
+        <button onClick={()=>setPremium(false)}
+          style={{flex:1,padding:'14px 12px',borderRadius:'var(--r-lg)',border:`1px solid ${!premium?'var(--accent-bd)':'var(--card-b)'}`,background:!premium?'var(--accent-soft)':'transparent',color:'var(--txt)',cursor:'pointer',textAlign:'left',transition:'background-color .15s ease, border-color .15s ease'}}>
+          <div style={{fontWeight:700,fontSize:14,display:'flex',alignItems:'center',gap:7}}><Icon name="clock" size={15} color={!premium?'var(--accent-2)':'var(--txt2)'}/> Обычная</div>
+          <div style={{fontSize:11,color:'var(--txt2)',marginTop:4}}>дешевле, с ожиданием</div>
+        </button>
+        <button onClick={()=>setPremium(true)}
+          style={{flex:1,padding:'14px 12px',borderRadius:'var(--r-lg)',border:`1px solid ${premium?'var(--accent-bd)':'var(--card-b)'}`,background:premium?'var(--accent-soft)':'transparent',color:'var(--txt)',cursor:'pointer',textAlign:'left',transition:'background-color .15s ease, border-color .15s ease'}}>
+          <div style={{fontWeight:700,fontSize:14,display:'flex',alignItems:'center',gap:7}}><Icon name="zap" size={15} color={premium?'var(--accent-2)':'var(--txt2)'}/> Премиум ×{mult}</div>
+          <div style={{fontSize:11,color:'var(--txt2)',marginTop:4}}>без ожидания, приоритет</div>
+        </button>
+      </div>
+
+      <div className="sec-title">Выберите тип проверки</div>
+      {checks.map(c => {
+        const price  = priceFor(c.priceKey);
+        const canPay = user?.is_whitelisted || Number(user?.tenge_balance||0) >= price;
+        return (
+          <button key={c.type} className={`check-card ${!canPay ? 'insufficient' : ''}`}
+            onClick={() => !loading && choose(c.type, price)} disabled={loading}>
+            <div>
+              <div style={{fontWeight:700,fontSize:16}}>{c.label}</div>
+              <div style={{fontSize:13,color:'var(--txt2)',marginTop:2}}>{c.sub}</div>
+            </div>
+            <div style={{textAlign:'right'}}>
+              <div style={{fontWeight:800,fontSize:18,color: canPay ? 'var(--accent-2)' : 'var(--txt2)'}}>{fmt(price)} ₸</div>
+              {!canPay && <div style={{fontSize:11,color:'var(--err)',marginTop:2}}>Мало средств</div>}
+            </div>
+          </button>
+        );
+      })}
+      {loading && <div style={{textAlign:'center',padding:16,color:'var(--txt2)',fontSize:13}}><span className="spinner-sm"/> Создаю заказ…</div>}
+      {(user?.tenge_balance || 0) < Math.min(...checks.map(c => priceFor(c.priceKey)||700)) && !user?.is_whitelisted && (
+        <button className="btn btn-secondary" style={{marginTop:16,display:'flex',alignItems:'center',justifyContent:'center',gap:8}} onClick={() => onNav('wallet')}>
+          <Icon name="wallet" size={17}/> Пополнить баланс
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── HumanizerScreen ──────────────────────────────────────────────────────────
+function HumanizerScreen({ user, onNav, onBalanceUpdate }) {
+  const [text, setText]   = useState('');
+  const [tone, setTone]   = useState('College');
+  const [mode, setMode]   = useState('Medium');
+  const [biz,  setBiz]    = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult]   = useState(null);
+  const [toast, showToast]    = useToast();
+  const fileRef = useRef();
+
+  const words    = text.trim().split(/\s+/).filter(Boolean).length;
+  const cost     = biz ? words * 5 : words * 0.5;
+  const isWl     = user?.is_whitelisted;
+  const canAfford = isWl || (user?.token_balance || 0) >= cost;
+
+  const TONES = { College:'Студенческий', Casual:'Разговорный', Business:'Деловой' };
+  const MODES = { Low:'Мягкий', Medium:'Средний', High:'Агрессивный' };
+
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (!['txt','docx','doc'].includes(ext)) { showToast('Поддерживаются .txt, .docx, .doc'); return; }
+    if (file.size > 10 * 1024 * 1024) { showToast('Файл слишком большой (макс 10 МБ)'); return; }
+
+    if (ext === 'txt') {
+      const reader = new FileReader();
+      reader.onload = ev => { setText(ev.target.result); showToast('Файл загружен'); };
+      reader.readAsText(file);
+    } else {
+      // docx/doc — отправим на API для извлечения текста
+      const fd = new FormData();
+      fd.append('file', file);
+      try {
+        const r = await fetch('/api/extract_text', {
+          method: 'POST',
+          headers: { 'X-Telegram-Init-Data': tg?.initData || '' },
+          body: fd,
+        });
+        if (r.ok) { const d = await r.json(); setText(d.text || ''); showToast('Файл загружен'); }
+        else showToast('Не удалось прочитать файл');
+      } catch { showToast('Ошибка загрузки файла'); }
+    }
+    e.target.value = '';
+  };
+
+  const submit = async () => {
+    if (words < 10) return;
+    setLoading(true); setResult(null);
+    try {
+      const d = await api('/api/humanize', { method: 'POST', body: JSON.stringify({ text, tone, mode, business: biz }) });
+      setResult(d);
+      if (onBalanceUpdate) onBalanceUpdate(d.balance);
+    } catch(e) { showToast('Ошибка: ' + e.message); }
+    finally { setLoading(false); }
+  };
+
+  const copy = () => result?.result && navigator.clipboard?.writeText(result.result).then(() => showToast('Скопировано!'));
+
+  return (
+    <div className="screen">
+      <Toast msg={toast}/>
+      <button className="back-btn" onClick={() => onNav('home')}>{ICONS.back} Назад</button>
+      <h2 style={{marginBottom:4}}>Хуманайзер</h2>
+      <p style={{marginBottom:16}}>Делаю ИИ-тексты неотличимыми от человеческих.</p>
+
+      <div className="card" style={{marginBottom:14}}>
+        <div style={{display:'flex',justifyContent:'space-between',fontSize:13}}>
+          <span style={{color:'var(--txt2)'}}>Стоимость: <b style={{color:'var(--txt)'}}>{(biz?5:.5).toFixed(1)}/слово</b></span>
+          <span style={{color:'var(--txt2)',display:'flex',alignItems:'center',gap:6}}><Icon name="coins" size={14} color="var(--accent-2)"/> Баланс: <b style={{color:'var(--txt)'}}>{fmtT(user?.token_balance)}</b></span>
+        </div>
+        {words >= 10 && <div style={{marginTop:8,fontSize:13,fontWeight:600,color: canAfford?'var(--ok)':'var(--err)'}}>
+          {canAfford ? `Спишется ${cost.toFixed(1)} токенов` : `Не хватает токенов — нужно ${cost.toFixed(1)}`}
+        </div>}
+      </div>
+
+      <div className="sec-title">Тон</div>
+      <div className="pill-row">
+        {Object.entries(TONES).map(([k,v]) => (
+          <button key={k} className={`pill ${tone===k?'on':''}`} onClick={() => setTone(k)}>{v}</button>
+        ))}
+      </div>
+
+      <div className="sec-title">Режим</div>
+      <div className="pill-row">
+        {Object.entries(MODES).map(([k,v]) => (
+          <button key={k} className={`pill ${mode===k?'on':''}`} onClick={() => setMode(k)}>{v}</button>
+        ))}
+      </div>
+
+      <div className="sec-title" style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+        <span>Бизнес-мод</span>
+        <button className={`toggle ${biz?'on':''}`} onClick={() => setBiz(!biz)}/>
+      </div>
+
+      <div style={{marginBottom:10}}>
+        <button className="file-btn" onClick={() => fileRef.current?.click()}>
+          {ICONS.file} Загрузить файл (.txt / .docx / .doc)
+          <input ref={fileRef} type="file" accept=".txt,.docx,.doc" style={{display:'none'}} onChange={handleFile}/>
+        </button>
+        <textarea
+          className="textarea"
+          placeholder="Или введите / вставьте текст здесь..."
+          value={text}
+          onChange={e => setText(e.target.value)}
+          rows={6}
+        />
+        <div style={{textAlign:'right',fontSize:12,color:'var(--txt2)',marginTop:4}}>{words} слов</div>
+      </div>
+
+      <button className="btn btn-primary" onClick={submit} disabled={words < 10 || (!isWl && !canAfford) || loading} style={{display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
+        {loading ? <><span className="spinner-sm"/> Обрабатываю…</> : <><Icon name="spark" size={17} color="#fff"/> Хуманизировать</>}
+      </button>
+
+      {result && (
+        <div style={{marginTop:16}}>
+          <div className="sec-title">Результат</div>
+          <div className="result-box">{result.result}</div>
+          <div style={{display:'flex',gap:8,marginTop:8,flexWrap:'wrap'}}>
+            <button className="copy-btn" onClick={copy}>{React.cloneElement(ICONS.copy,{width:14,height:14})} Скопировать</button>
+            <span style={{fontSize:12,color:'var(--txt2)',alignSelf:'center'}}>
+              {result.words_input}→{result.words_output} слов · −{result.tokens_spent?.toFixed(1)||0} токенов
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── WalletScreen (баланс + пополнение + покупка токенов) ─────────────────────
+function WalletScreen({ user, packages, onRefresh, onBalanceUpdate }) {
+  const [toast, showToast]     = useToast();
+  const [customAmt, setCustomAmt] = useState('');
+  const [kaspiInfo, setKaspiInfo] = useState(null);  // после topup init
+  const [loadingTopup, setLoadingTopup] = useState(false);
+  const [loadingPkg,   setLoadingPkg]   = useState(null); // index пакета
+  const [localUser, setLocalUser]       = useState(user);
+
+  // Sync if parent user changes
+  React.useEffect(() => setLocalUser(user), [user]);
+
+  const AMOUNTS = [1000, 2000, 5000, 10000];
+
+  const doTopup = async (amount) => {
+    const amt = parseFloat(amount);
+    if (!amt || amt < 100) { showToast('Минимум 100 ₸'); return; }
+    setLoadingTopup(true);
+    try {
+      const res = await api('/api/topup', { method:'POST', body: JSON.stringify({ amount: amt }) });
+      setKaspiInfo(res);
+    } catch(e) {
+      showToast(e.message);
+    } finally {
+      setLoadingTopup(false);
+    }
+  };
+
+  const buyTokens = async (pkg, idx) => {
+    const bal = Number(localUser?.tenge_balance || 0);
+    if (!localUser?.is_whitelisted && bal < pkg.tenge) {
+      showToast(`Нужно ${fmt(pkg.tenge)} ₸`);
+      return;
+    }
+    setLoadingPkg(idx);
+    try {
+      const res = await api('/api/buy_tokens', { method:'POST', body: JSON.stringify({ tokens: pkg.tokens, tenge: pkg.tenge }) });
+      setLocalUser(u => ({ ...u, token_balance: res.new_token_balance, tenge_balance: res.new_tenge_balance }));
+      onBalanceUpdate && onBalanceUpdate({ token_balance: res.new_token_balance, tenge_balance: res.new_tenge_balance });
+      showToast(`Начислено +${fmt(pkg.tokens)} токенов`);
+    } catch(e) {
+      showToast(e.message);
+    } finally {
+      setLoadingPkg(null);
+    }
+  };
+
+  // Kaspi payment info modal
+  if (kaspiInfo) return (
+    <div className="screen">
+      <div style={{textAlign:'center',marginBottom:24,marginTop:16}}>
+        <div className="ico-badge">{React.cloneElement(ICONS.card,{width:30,height:30})}</div>
+        <h2 style={{marginBottom:8}}>Реквизиты для оплаты</h2>
+        <p style={{marginBottom:0}}>Переведите точную сумму через Kaspi</p>
+      </div>
+      <div className="card" style={{marginBottom:16}}>
+        {[
+          ['Получатель', kaspiInfo.kaspi_name],
+          ['Телефон',    kaspiInfo.kaspi_phone],
+          ['Сумма',      `${fmt(kaspiInfo.amount)} ₸`],
+        ].map(([l,v]) => (
+          <div key={l} style={{display:'flex',justifyContent:'space-between',padding:'10px 0',borderBottom:'1px solid var(--card-b)'}}>
+            <span style={{color:'var(--txt2)',fontSize:14}}>{l}</span>
+            <span style={{fontWeight:700,fontSize:14}}>{v}</span>
+          </div>
+        ))}
+      </div>
+      <div className="card" style={{background:'rgba(99,102,241,0.08)',borderColor:'rgba(99,102,241,0.3)',marginBottom:20}}>
+        <p style={{color:'var(--txt)',fontSize:13,lineHeight:1.6}}>
+          После перевода <b>откройте чат бота</b> и отправьте туда <b>PDF-чек</b> из приложения Kaspi.<br/>
+          Баланс пополнится автоматически.
+        </p>
+      </div>
+      <button className="btn btn-primary" onClick={() => { setKaspiInfo(null); setCustomAmt(''); }}>
+        Понятно
+      </button>
+    </div>
+  );
+
+  return (
+    <div className="screen">
+      <Toast msg={toast}/>
+      <h2 style={{marginBottom:16}}>Кошелёк</h2>
+
+      <div className="bal-card">
+        <div className="bal-label">Баланс</div>
+        <div className="bal-amount">{fmt(localUser?.tenge_balance)} ₸</div>
+        <div className="bal-sub">Используется для Turnitin и покупки токенов</div>
+        <div className="bal-tok">
+          <span style={{fontSize:13,fontWeight:600,display:'flex',alignItems:'center',gap:7}}><Icon name="coins" size={15} color="var(--accent-2)"/> Токены Хуманайзера</span>
+          <span style={{fontSize:16,fontWeight:800}}>{fmtT(localUser?.token_balance)}</span>
+        </div>
+      </div>
+
+      <div className="sec-title">Пополнить баланс (₸)</div>
+      <div className="topup-grid">
+        {AMOUNTS.map(a => (
+          <button key={a} className="topup-btn" onClick={() => doTopup(a)} disabled={loadingTopup}>
+            {fmt(a)} ₸
+          </button>
+        ))}
+      </div>
+      <div className="topup-custom">
+        <input
+          type="number"
+          placeholder="Другая сумма..."
+          value={customAmt}
+          onChange={e => setCustomAmt(e.target.value)}
+        />
+        <button className="btn-sm btn-sm-blue" onClick={() => doTopup(customAmt)} disabled={loadingTopup}>
+          {loadingTopup ? '...' : 'Пополнить'}
+        </button>
+      </div>
+      <p style={{marginBottom:20,fontSize:12}}>
+        Получите реквизиты Kaspi, переведите сумму и отправьте PDF-чек боту.
+      </p>
+
+      <div className="sec-title">Купить токены Хуманайзера</div>
+      {(packages || []).map((pkg, i) => {
+        const canPay = localUser?.is_whitelisted || Number(localUser?.tenge_balance||0) >= pkg.tenge;
+        const isLoading = loadingPkg === i;
+        return (
+          <button key={i} className={`pkg-card ${i===1?'pop':''} ${!canPay?'disabled':''}`}
+            onClick={() => canPay && !loadingPkg && buyTokens(pkg, i)} disabled={!!loadingPkg}>
+            {i===1 && <div className="pkg-badge">Популярный</div>}
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+              <div>
+                <div style={{fontWeight:800,fontSize:18,display:'flex',alignItems:'center',gap:8}}><Icon name="coins" size={18} color="var(--accent-2)"/> {fmt(pkg.tokens)} токенов</div>
+                <div style={{fontSize:13,color:'var(--txt2)',marginTop:2}}>~{Math.floor(pkg.tokens/0.5)} слов</div>
+              </div>
+              <div style={{textAlign:'right'}}>
+                <div style={{fontWeight:800,fontSize:18,color: canPay?'var(--accent-2)':'var(--txt2)'}}>
+                  {isLoading ? <span className="spinner-sm" style={{borderTopColor:'var(--accent-2)'}}/> : `${fmt(pkg.tenge)} ₸`}
+                </div>
+                {!canPay && <div style={{fontSize:11,color:'var(--err)'}}>Мало средств</div>}
+              </div>
+            </div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── RentalScreen (аренда ИИ-аккаунтов) ───────────────────────────────────────
+function RentalSheet({ service, user, onClose, onPurchased, onNav, onBalanceUpdate, showToast }) {
+  const [open, setOpen]   = useState(false);
+  const [tariff, setTariff] = useState(service.tariffs?.[0] || null);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult]   = useState(null);  // креды после покупки
+  const reqIdRef = useRef(null);
+
+  useEffect(() => { requestAnimationFrame(() => setOpen(true)); }, []);
+  const close = () => { setOpen(false); setTimeout(onClose, 300); };
+
+  const buy = async () => {
+    if (!tariff || loading) return;
+    const balance = Number(user?.tenge_balance || 0);
+    if (balance < tariff.price) {
+      showToast(`Нужно ${fmt(tariff.price)} ₸, у вас ${fmt(balance)} ₸`);
+      close();
+      setTimeout(() => onNav('wallet'), 350);
+      return;
+    }
+    setLoading(true);
+    if (!reqIdRef.current) {
+      reqIdRef.current = (crypto.randomUUID && crypto.randomUUID()) ||
+        (Date.now() + '-' + Math.random().toString(36).slice(2));
+    }
+    try {
+      const res = await api('/api/rental/order', { method:'POST', body: JSON.stringify({
+        service_id: service.id, tariff_id: tariff.id, request_id: reqIdRef.current,
+      })});
+      reqIdRef.current = null;
+      setResult(res);
+      onBalanceUpdate && onBalanceUpdate({ tenge_balance: res.balance });
+      onPurchased && onPurchased();
+    } catch(e) {
+      showToast(e.message);      // ключ сохраняем — ретрай дедуплицируется
+      if (/закончились/.test(e.message)) { onPurchased && onPurchased(); close(); }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const copy = (v, label) => navigator.clipboard?.writeText(v).then(() => showToast(label + ' скопирован'));
+
+  return (
+    <>
+      <div className={`sheet-dim ${open?'open':''}`} onClick={close}/>
+      <div className={`sheet ${open?'open':''}`}>
+        <div className="sheet-grip"/>
+        {result ? (
+          <>
+            <div style={{textAlign:'center',marginBottom:18}}>
+              <div className="ico-badge" style={{background:'var(--ok-bg)',color:'var(--ok)'}}>{React.cloneElement(ICONS.checkc,{width:30,height:30})}</div>
+              <h3 style={{fontSize:19,marginBottom:4}}>{result.service_name || service.name} — ваш!</h3>
+              <p>Доступ до {parseUTC(result.expires_at).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})} · осталось <Countdown expiresAt={result.expires_at}/></p>
+            </div>
+            <div className="cred-row">
+              <div style={{minWidth:0}}>
+                <div className="cred-lbl">Логин</div>
+                <div className="cred-val">{result.login}</div>
+              </div>
+              <button className="btn-sm btn-sm-blue" onClick={() => copy(result.login,'Логин')}>{React.cloneElement(ICONS.copy,{width:15,height:15})}</button>
+            </div>
+            <div className="cred-row">
+              <div style={{minWidth:0}}>
+                <div className="cred-lbl">Пароль</div>
+                <div className="cred-val">{result.password}</div>
+              </div>
+              <button className="btn-sm btn-sm-blue" onClick={() => copy(result.password,'Пароль')}>{React.cloneElement(ICONS.copy,{width:15,height:15})}</button>
+            </div>
+            <p style={{fontSize:12,marginTop:10,marginBottom:14}}>Данные доступа всегда под рукой — раздел «Аренда» → «Мои аренды».</p>
+            <button className="btn btn-primary" onClick={close}>Понятно</button>
+          </>
+        ) : (
+          <>
+            <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:6}}>
+              <div className="rent-ico"><RentIcon icon={service.icon} size={26}/></div>
+              <div>
+                <h3 style={{fontSize:18,marginBottom:2}}>{service.name}</h3>
+                {service.description && <p style={{fontSize:13}}>{service.description}</p>}
+              </div>
+            </div>
+            <div className="sec-title" style={{marginTop:14}}>Тариф</div>
+            {(service.tariffs||[]).map(t => (
+              <button key={t.id} className={`tariff-btn ${tariff?.id===t.id?'on':''}`} onClick={() => setTariff(t)}>
+                <div style={{textAlign:'left'}}>
+                  <div style={{fontWeight:700,fontSize:15}}>{t.name}</div>
+                  <div style={{fontSize:12,color:'var(--txt2)',marginTop:1}}>{durationLabel(t.duration_hours)}</div>
+                </div>
+                <div style={{fontWeight:800,fontSize:17,color: tariff?.id===t.id ? 'var(--accent-2)' : 'var(--txt)'}}>{fmt(t.price)} ₸</div>
+              </button>
+            ))}
+            <button className="btn btn-primary" style={{marginTop:12,display:'flex',alignItems:'center',justifyContent:'center',gap:8}}
+              onClick={buy} disabled={!tariff || loading}>
+              {loading ? <><span className="spinner-sm"/> Оформляю…</> : <>Арендовать за {fmt(tariff?.price||0)} ₸</>}
+            </button>
+            <p style={{fontSize:12,textAlign:'center',marginTop:10}}>Аккаунт выдаётся мгновенно. Баланс: {fmt(user?.tenge_balance)} ₸</p>
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+function RentalScreen({ user, onNav, onBalanceUpdate }) {
+  const [toast, showToast] = useToast();
+  const [services, setServices] = useState(null);
+  const [rentals,  setRentals]  = useState([]);
+  const [q,   setQ]   = useState('');
+  const [sel, setSel] = useState(null);          // сервис в шите покупки
+  const [showCreds, setShowCreds] = useState({}); // rental_id → bool
+
+  const refresh = useCallback(async () => {
+    try {
+      const [svc, my] = await Promise.all([api('/api/rental/services'), api('/api/rental/my')]);
+      setServices(svc.services || []);
+      setRentals(my.rentals || []);
+    } catch(e) { showToast('Ошибка загрузки: ' + e.message); setServices([]); }
+  }, []);
+  useEffect(() => { refresh(); }, []);
+
+  const notify = async (svc) => {
+    try {
+      await api('/api/rental/notify', { method:'POST', body: JSON.stringify({ service_id: svc.id }) });
+      showToast('Сообщим, как только освободится');
+      refresh();
+    } catch(e) { showToast(e.message); }
+  };
+
+  const copy = (v, label) => navigator.clipboard?.writeText(v).then(() => showToast(label + ' скопирован'));
+
+  const active  = rentals.filter(r => r.status === 'active');
+  const history = rentals.filter(r => r.status !== 'active').slice(0, 5);
+  const ql = q.trim().toLowerCase();
+  const filtered = (services || []).filter(s =>
+    !ql || s.name.toLowerCase().includes(ql) || (s.description||'').toLowerCase().includes(ql));
+
+  return (
+    <div className="screen">
+      <Toast msg={toast}/>
+      <h2 style={{marginBottom:4}}>Аренда ИИ</h2>
+      <p style={{marginBottom:16}}>Премиум-аккаунты с мгновенной выдачей</p>
+
+      {active.length > 0 && <>
+        <div className="sec-title">Мои аренды</div>
+        {active.map(r => (
+          <div key={r.id} className="card" style={{padding:16}}>
+            <div style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer'}} onClick={() => setShowCreds(p => ({...p,[r.id]:!p[r.id]}))}>
+              <div className="rent-ico"><RentIcon icon={r.icon} size={24}/></div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontWeight:700,fontSize:15}}>{r.service_name}</div>
+                <div style={{fontSize:12,color:'var(--txt2)',marginTop:1}}>{r.tariff_name}</div>
+              </div>
+              <div style={{textAlign:'right'}}>
+                <Countdown expiresAt={r.expires_at}/>
+                <div style={{fontSize:11,color:'var(--txt2)',marginTop:1}}>осталось</div>
+              </div>
+            </div>
+            {showCreds[r.id] && <div style={{marginTop:12}}>
+              <div className="cred-row">
+                <div style={{minWidth:0}}><div className="cred-lbl">Логин</div><div className="cred-val">{r.login}</div></div>
+                <button className="btn-sm btn-sm-blue" onClick={() => copy(r.login,'Логин')}>{React.cloneElement(ICONS.copy,{width:15,height:15})}</button>
+              </div>
+              <div className="cred-row" style={{marginBottom:0}}>
+                <div style={{minWidth:0}}><div className="cred-lbl">Пароль</div><div className="cred-val">{r.password}</div></div>
+                <button className="btn-sm btn-sm-blue" onClick={() => copy(r.password,'Пароль')}>{React.cloneElement(ICONS.copy,{width:15,height:15})}</button>
+              </div>
+            </div>}
+          </div>
+        ))}
+      </>}
+
+      <div className="sec-title">Каталог</div>
+      {(services || []).length > 4 && (
+        <div className="search-row">
+          {ICONS.search}
+          <input placeholder="Поиск по названию сервиса" value={q} onChange={e => setQ(e.target.value)}/>
+        </div>
+      )}
+      {services === null && <Spinner/>}
+      {services !== null && filtered.length === 0 && <p className="empty">{ql ? 'Ничего не найдено' : 'Каталог скоро пополнится'}</p>}
+      {filtered.map(s => {
+        const free = s.available > 0;
+        const minPrice = Math.min(...s.tariffs.map(t => t.price));
+        const minT = s.tariffs.find(t => t.price === minPrice);
+        return (
+          <button key={s.id} className="svc-card" style={{alignItems:'flex-start'}} onClick={() => free ? setSel(s) : notify(s)}>
+            <div className="rent-ico"><RentIcon icon={s.icon} size={24}/></div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontWeight:700,fontSize:16}}>{s.name}</div>
+              {s.description && <div style={{fontSize:12,color:'var(--txt2)',marginTop:2,lineHeight:1.45}}>{s.description}</div>}
+              <div style={{marginTop:8,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+                {free
+                  ? <span className="avail avail-on">Свободно: {s.available}</span>
+                  : <span className="avail avail-off">Нет в наличии</span>}
+                {!free && s.waiting > 0 && <span className="avail avail-wait">{s.waiting} ждут</span>}
+                {!free && <span style={{fontSize:12,fontWeight:700,color:'var(--accent-2)',display:'inline-flex',alignItems:'center',gap:5}}>{React.cloneElement(ICONS.bell,{width:13,height:13})} Уведомить</span>}
+              </div>
+            </div>
+            <div style={{textAlign:'right',flexShrink:0}}>
+              <div style={{fontWeight:800,fontSize:17,color:'var(--accent-2)'}}>{fmt(minPrice)} ₸</div>
+              <div style={{fontSize:11,color:'var(--txt2)',marginTop:1}}>за {minT ? durationLabel(minT.duration_hours) : '—'}</div>
+            </div>
+          </button>
+        );
+      })}
+
+      {history.length > 0 && <>
+        <div className="sec-title" style={{marginTop:14}}>История</div>
+        {history.map(r => (
+          <div key={r.id} className="order-row">
+            <div className="rent-ico" style={{width:36,height:36,borderRadius:10}}><RentIcon icon={r.icon} size={18}/></div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontWeight:600,fontSize:14}}>{r.service_name}</div>
+              <div className="order-meta">{r.tariff_name} · {fmt(r.amount_tenge)} ₸</div>
+            </div>
+            {statusTag(r.status)}
+          </div>
+        ))}
+      </>}
+
+      {sel && <RentalSheet service={sel} user={user} showToast={showToast}
+        onClose={() => setSel(null)} onPurchased={refresh}
+        onNav={onNav} onBalanceUpdate={onBalanceUpdate}/>}
+    </div>
+  );
+}
+
+// ── ProfileScreen ────────────────────────────────────────────────────────────
+function ProfileScreen({ user, orders }) {
+  const myOrders = (orders || []).slice(0, 20);
+  const TYPE_ICON = { sim:'scan', similarity:'scan', ai:'cpu', both:'scan' };
+  return (
+    <div className="screen">
+      <div className="card" style={{display:'flex',alignItems:'center',gap:14,marginBottom:16}}>
+        <div style={{width:52,height:52,borderRadius:'50%',background:'var(--accent)',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,fontWeight:800,flexShrink:0}}>
+          {(user?.full_name||user?.username||'U')[0].toUpperCase()}
+        </div>
+        <div>
+          <div style={{fontWeight:700,fontSize:16}}>{user?.full_name || 'Пользователь'}</div>
+          <div style={{fontSize:13,color:'var(--txt2)'}}>@{user?.username || '—'}</div>
+        </div>
+      </div>
+
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:16}}>
+        <div className="card" style={{textAlign:'center',padding:'14px 10px'}}>
+          <div style={{fontSize:22,fontWeight:900}}>{fmt(user?.tenge_balance)} ₸</div>
+          <div style={{fontSize:11,color:'var(--txt2)',marginTop:2}}>Баланс</div>
+        </div>
+        <div className="card" style={{textAlign:'center',padding:'14px 10px'}}>
+          <div style={{fontSize:22,fontWeight:900}}>{fmtT(user?.token_balance)}</div>
+          <div style={{fontSize:11,color:'var(--txt2)',marginTop:2,display:'flex',alignItems:'center',justifyContent:'center',gap:5}}><Icon name="coins" size={12} color="var(--txt2)"/> Токены</div>
+        </div>
+      </div>
+
+      {myOrders.length > 0 && <>
+        <div className="sec-title">История заказов</div>
+        {myOrders.map(o => (
+          <div key={o.id} className="order-row">
+            <div className="row-ico">
+              {React.cloneElement(ICONS[TYPE_ICON[o.report_type]||'scan'],{width:16,height:16})}
+            </div>
+            <div style={{flex:1}}>
+              <div style={{fontWeight:600,fontSize:14}}>#{o.id} · {o.report_type?.toUpperCase()}</div>
+              <div className="order-meta">{(o.created_at||'').slice(0,16)}</div>
+            </div>
+            {statusTag(o.status)}
+          </div>
+        ))}
+      </>}
+      {myOrders.length === 0 && <p className="empty">Заказов пока нет</p>}
+    </div>
+  );
+}
+
+// ── AdminScreen ──────────────────────────────────────────────────────────────
+function AdminScreen({ toast }) {
+  const [view,       setView]       = useState('menu');
+  const [stats,      setStats]      = useState(null);
+  const [orders,     setOrders]     = useState([]);
+  const [queue,      setQueue]      = useState({ premium:[], regular:[], total:0 });
+  const [wlUsers,    setWlUsers]    = useState([]);
+  const [banData,    setBanData]    = useState({ by_id:[], by_username:[] });
+  const [wlInput,    setWlInput]    = useState('');
+  const [banInput,   setBanInput]   = useState('');
+  const [searchQ,    setSearchQ]    = useState('');
+  const [foundUser,  setFoundUser]  = useState(null);
+  const [giveAmt,    setGiveAmt]    = useState('');
+  const [prices,     setPrices]     = useState({});
+  const [priceSim,   setPriceSim]   = useState('');
+  const [priceAi,    setPriceAi]    = useState('');
+  const [priceBoth,  setPriceBoth]  = useState('');
+  const [settings2,  setSettings2]  = useState({});
+  const [settingEdit,setSettingEdit]= useState({});
+  const [loading,    setLoading]    = useState(false);
+  const [cleaning,   setCleaning]   = useState(false);
+  // Аренда
+  const [rentSvcs,    setRentSvcs]    = useState([]);
+  const [rentAccs,    setRentAccs]    = useState([]);
+  const [rentOrders,  setRentOrders]  = useState([]);
+  const [rentSvcSel,  setRentSvcSel]  = useState(null);   // фильтр склада по сервису
+  const [svcForm,     setSvcForm]     = useState({ name:'', icon:'', description:'' });
+  const [tariffForm,  setTariffForm]  = useState({ svc:null, name:'', hours:'', price:'' });
+  const [accForm,     setAccForm]     = useState({ login:'', password:'', note:'' });
+  const [showPass,    setShowPass]    = useState({});      // account_id → bool
+
+  const loadRentSvcs   = async () => { const d = await api('/api/admin/rental/services'); setRentSvcs(d.services||[]); };
+  const loadRentAccs   = async () => { const d = await api('/api/admin/rental/accounts'); setRentAccs(d.accounts||[]); };
+  const loadRentOrders = async () => { const d = await api('/api/admin/rental/orders'); setRentOrders(d.rentals||[]); };
+
+  const go = async (v) => {
+    setView(v); setLoading(true);
+    try {
+      if (v === 'stats') { const d = await api('/api/admin/stats'); setStats(d); }
+      if (v === 'orders') { const d = await api('/api/admin/queue'); setQueue(d); }
+      if (v === 'whitelist') { const d = await api('/api/admin/whitelist'); setWlUsers(d.users||[]); }
+      if (v === 'banlist') { const d = await api('/api/admin/banlist'); setBanData(d); }
+      if (v === 'prices') { const d = await api('/api/prices'); setPrices(d); setPriceSim(d.price_sim||''); setPriceAi(d.price_ai||''); setPriceBoth(d.price_both||''); }
+      if (v === 'settings') { const d = await api('/api/admin/settings'); setSettings2(d); setSettingEdit({...d}); }
+      if (v === 'rental_services') { await loadRentSvcs(); }
+      if (v === 'rental_accounts') { await Promise.all([loadRentSvcs(), loadRentAccs()]); }
+      if (v === 'rental_orders')   { await loadRentOrders(); }
+    } catch(e) { toast('Ошибка: '+e.message); } finally { setLoading(false); }
+  };
+
+  const Back = ({ to='menu' }) => (
+    <button className="back-btn" onClick={() => setView(to)}>{ICONS.back} Назад</button>
+  );
+
+  const TILES = [
+    { v:'stats',     icon:'users',  label:'Статистика',  sub:'Пользователи' },
+    { v:'orders',    icon:'inbox',  label:'Очереди',     sub:'Обычная + премиум' },
+    { v:'rental_services', icon:'key',   label:'Аренда: каталог', sub:'Сервисы и тарифы' },
+    { v:'rental_accounts', icon:'users', label:'Аренда: склад',   sub:'Логины и пароли' },
+    { v:'rental_orders',   icon:'clock', label:'Аренда: активные',sub:'Отмена с возвратом' },
+    { v:'whitelist', icon:'shield', label:'Whitelist',   sub:'Бесплатный доступ' },
+    { v:'banlist',   icon:'ban',    label:'Бан-лист',    sub:'Заблокированные' },
+    { v:'user',      icon:'search', label:'Найти юзера', sub:'ID или @username' },
+    { v:'receipt',   icon:'search', label:'Поиск по чеку', sub:'QR-номер Kaspi' },
+    { v:'prices',    icon:'money',  label:'Цены',        sub:'Turnitin' },
+    { v:'settings',  icon:'gear',   label:'Настройки',   sub:'Реквизиты и проч.' },
+    { v:'cleanup',   icon:'clean',  label:'Очистка',     sub:'Кэш браузера' },
+  ];
+
+  if (view === 'menu') return (
+    <div className="screen">
+      <h2 style={{marginBottom:16}}>Администратор</h2>
+      <div className="adm-grid">
+        {TILES.map(t => (
+          <button key={t.v} className="adm-tile" onClick={() => go(t.v)}>
+            <div className="adm-tile-icon">{ICONS[t.icon]}</div>
+            <div>
+              <div style={{fontWeight:700,fontSize:14,color:'var(--txt)'}}>{t.label}</div>
+              <div style={{fontSize:11,color:'var(--txt2)',marginTop:2}}>{t.sub}</div>
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
+  if (view === 'stats') return (
+    <div className="screen">
+      <Back/>
+      <h2 style={{marginBottom:14}}>Статистика</h2>
+      {loading ? <Spinner/> : stats && <>
+        <div className="stat-grid">
+          <div className="stat-box"><div className="stat-num">{stats.total_users||0}</div><div className="stat-lbl">Пользователей</div></div>
+          <div className="stat-box"><div className="stat-num">{stats.whitelist_count||0}</div><div className="stat-lbl">Whitelist</div></div>
+          <div className="stat-box"><div className="stat-num">{stats.banned_count||0}</div><div className="stat-lbl">Забанено</div></div>
+          <div className="stat-box"><div className="stat-num">{Object.values(stats.order_counts||{}).reduce((a,b)=>a+b,0)}</div><div className="stat-lbl">Всего заказов</div></div>
+        </div>
+        <div className="sec-title">Заказы по типу</div>
+        {[['ai','cpu','AI-детекция'],['sim','scan','Плагиат'],['both','spark','Оба отчёта']].map(([k,ic,lbl]) => (
+          <div key={k} style={{display:'flex',justifyContent:'space-between',padding:'10px 0',borderBottom:'1px solid var(--card-b)',fontSize:14}}>
+            <span style={{color:'var(--txt2)',display:'flex',alignItems:'center',gap:8}}><Icon name={ic} size={15} color="var(--txt2)"/> {lbl}</span>
+            <b>{(stats.by_type||{})[k]||0} шт{((stats.by_type_done||{})[k]||0) ? ` · ${(stats.by_type_done||{})[k]} готово` : ''}</b>
+          </div>
+        ))}
+        <div className="sec-title" style={{marginTop:14}}>Заказы по статусам</div>
+        {Object.entries(stats.order_counts||{}).map(([s,c]) => (
+          <div key={s} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:'1px solid var(--card-b)',fontSize:14}}>
+            {statusTag(s)} <b>{c}</b>
+          </div>
+        ))}
+        <div className="sec-title" style={{marginTop:14}}>Выручка Turnitin</div>
+        {Object.entries(stats.turnitin_revenue||{}).map(([p,d]) => (
+          <div key={p} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:'1px solid var(--card-b)',fontSize:14}}>
+            <span style={{color:'var(--txt2)'}}>{p}</span> <b>{fmt(d.tenge)} ₸ · {d.count} шт</b>
+          </div>
+        ))}
+      </>}
+    </div>
+  );
+
+  if (view === 'orders') {
+    const TYPE_LBL = { sim:'Плагиат', ai:'AI-детекция', both:'Оба' };
+    const cancelOrder = async (id) => {
+      if (!window.confirm(`Отменить заказ #${id} и вернуть деньги пользователю на баланс?`)) return;
+      try {
+        const r = await api('/api/admin/cancel_order', { method:'POST', body:JSON.stringify({ order_id:id }) });
+        toast(`Заказ #${id} отменён · возврат ${fmt(r.refunded||0)} ₸`);
+        const d = await api('/api/admin/queue'); setQueue(d);
+      } catch(e) { toast('Ошибка: '+e.message); }
+    };
+    const QueueRow = (o) => (
+      <div key={o.id} className="order-row">
+        <div style={{flex:1}}>
+          <div style={{fontWeight:600}}>#{o.id} · {TYPE_LBL[o.report_type]||o.report_type} · @{o.username||o.user_id}</div>
+          <div className="order-meta">{statusTag(o.status)} · <b>{fmt(o.amount_tenge)} ₸</b> · ~{o.eta_min} мин</div>
+        </div>
+        <button className="btn-sm btn-sm-red" onClick={()=>cancelOrder(o.id)}>Отменить</button>
+      </div>
+    );
+    return (
+      <div className="screen">
+        <Back/>
+        <h2 style={{marginBottom:6}}>Очереди</h2>
+        <p style={{marginBottom:14,color:'var(--txt2)',fontSize:13}}>Всего в очереди: <b>{queue.total||0}</b> · ~{queue.eta_total_min||0} мин</p>
+        {loading ? <Spinner/> : <>
+          <div className="sec-title"><Icon name="zap" size={14}/> Премиум ({(queue.premium||[]).length})</div>
+          {(queue.premium||[]).length === 0 ? <p className="empty">Пусто</p> : queue.premium.map(QueueRow)}
+          <div className="sec-title" style={{marginTop:14}}><Icon name="clock" size={14}/> Обычная ({(queue.regular||[]).length})</div>
+          {(queue.regular||[]).length === 0 ? <p className="empty">Пусто</p> : queue.regular.map(QueueRow)}
+        </>}
+      </div>
+    );
+  }
+
+  if (view === 'whitelist') {
+    const addWl = async () => {
+      if (!wlInput.trim()) return;
+      const id = parseInt(wlInput.trim());
+      if (!id) { toast('Введите числовой Telegram ID'); return; }
+      try { await api('/api/admin/whitelist/add', { method:'POST', body:JSON.stringify({ tg_id:id }) }); toast('Добавлен'); setWlInput(''); const d = await api('/api/admin/whitelist'); setWlUsers(d.users||[]); }
+      catch(e) { toast('Ошибка: '+e.message); }
+    };
+    const rmWl = async (id) => {
+      try { await api('/api/admin/whitelist/remove', { method:'POST', body:JSON.stringify({ tg_id:id }) }); toast('Удалён'); const d = await api('/api/admin/whitelist'); setWlUsers(d.users||[]); }
+      catch(e) { toast('Ошибка: '+e.message); }
+    };
+    return (
+      <div className="screen">
+        <Back/><h2 style={{marginBottom:14}}>Whitelist</h2>
+        <div className="adm-row">
+          <input className="adm-input" placeholder="Telegram ID" value={wlInput} onChange={e=>setWlInput(e.target.value)}/>
+          <button className="btn-sm btn-sm-green" onClick={addWl}>Добавить</button>
+        </div>
+        {loading ? <Spinner/> : wlUsers.map(u => (
+          <div key={u.tg_id} className="order-row">
+            <div style={{flex:1}}>
+              <div style={{fontWeight:600}}>{u.full_name||'—'}</div>
+              <div className="order-meta">@{u.username||'—'} · {u.tg_id}</div>
+            </div>
+            <button className="btn-sm btn-sm-red" onClick={()=>rmWl(u.tg_id)}>Убрать</button>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (view === 'banlist') {
+    const banUN = async () => {
+      if (!banInput.trim()) return;
+      try { await api('/api/admin/ban_username', { method:'POST', body:JSON.stringify({ username:banInput.trim() }) }); toast('Забанен'); setBanInput(''); const d = await api('/api/admin/banlist'); setBanData(d); }
+      catch(e) { toast('Ошибка: '+e.message); }
+    };
+    const unbanUN = async (u) => {
+      try { await api('/api/admin/unban_username', { method:'POST', body:JSON.stringify({ username:u }) }); toast('Разбанен'); const d = await api('/api/admin/banlist'); setBanData(d); }
+      catch(e) { toast('Ошибка: '+e.message); }
+    };
+    const unbanID = async (id) => {
+      try { await api('/api/admin/unban', { method:'POST', body:JSON.stringify({ tg_id:id }) }); toast('Разбанен'); const d = await api('/api/admin/banlist'); setBanData(d); }
+      catch(e) { toast('Ошибка: '+e.message); }
+    };
+    return (
+      <div className="screen">
+        <Back/><h2 style={{marginBottom:14}}>Бан-лист</h2>
+        <div className="adm-row">
+          <input className="adm-input" placeholder="@username" value={banInput} onChange={e=>setBanInput(e.target.value)}/>
+          <button className="btn-sm btn-sm-red" onClick={banUN}>Забанить</button>
+        </div>
+        {banData.by_id?.length > 0 && <><div className="sec-title">По ID</div>{banData.by_id.map(u=>(
+          <div key={u.tg_id} className="order-row">
+            <div style={{flex:1}}><div style={{fontWeight:600}}>@{u.username||'—'}</div><div className="order-meta">{u.tg_id}</div></div>
+            <button className="btn-sm btn-sm-gray" onClick={()=>unbanID(u.tg_id)}>Разбанить</button>
+          </div>
+        ))}</>}
+        {banData.by_username?.length > 0 && <><div className="sec-title">По username</div>{banData.by_username.map(u=>(
+          <div key={u.username} className="order-row">
+            <div style={{flex:1}}><div style={{fontWeight:600}}>@{u.username}</div>{u.reason&&<div className="order-meta">{u.reason}</div>}</div>
+            <button className="btn-sm btn-sm-gray" onClick={()=>unbanUN(u.username)}>Разбанить</button>
+          </div>
+        ))}</>}
+      </div>
+    );
+  }
+
+  if (view === 'user') {
+    const search = async () => {
+      if (!searchQ.trim()) return;
+      setLoading(true);
+      try { const d = await api(`/api/admin/user?q=${encodeURIComponent(searchQ.trim())}`); setFoundUser(d); }
+      catch(e) { toast(e.message); setFoundUser(null); } finally { setLoading(false); }
+    };
+    const giveTokens = async () => {
+      const amt = parseFloat(giveAmt);
+      if (!amt || !foundUser) return;
+      try { const d = await api('/api/admin/give_tokens', { method:'POST', body:JSON.stringify({ tg_id:foundUser.tg_id, amount:amt }) }); toast(`+${amt} токенов → ${d.new_balance.toFixed(1)}`); setFoundUser(u=>({...u,token_balance:d.new_balance})); setGiveAmt(''); }
+      catch(e) { toast('Ошибка: '+e.message); }
+    };
+    const toggleWl = async () => {
+      if (!foundUser) return;
+      const ep = foundUser.is_whitelisted ? '/api/admin/whitelist/remove' : '/api/admin/whitelist/add';
+      try { await api(ep, { method:'POST', body:JSON.stringify({ tg_id:foundUser.tg_id }) }); setFoundUser(u=>({...u,is_whitelisted:!u.is_whitelisted})); toast('Обновлено'); }
+      catch(e) { toast('Ошибка: '+e.message); }
+    };
+    const banUser   = async () => { if (!foundUser) return; try { await api('/api/admin/ban', { method:'POST', body:JSON.stringify({ tg_id:foundUser.tg_id }) }); toast('Забанен'); setFoundUser(u=>({...u,is_banned:1})); } catch(e) { toast(e.message); } };
+    const unbanUser = async () => { if (!foundUser) return; try { await api('/api/admin/unban', { method:'POST', body:JSON.stringify({ tg_id:foundUser.tg_id }) }); toast('Разбанен'); setFoundUser(u=>({...u,is_banned:0})); } catch(e) { toast(e.message); } };
+    return (
+      <div className="screen">
+        <Back/><h2 style={{marginBottom:14}}>Найти пользователя</h2>
+        <div className="adm-row">
+          <input className="adm-input" placeholder="ID или @username" value={searchQ} onChange={e=>setSearchQ(e.target.value)} onKeyDown={e=>e.key==='Enter'&&search()}/>
+          <button className="btn-sm btn-sm-blue" onClick={search}>Найти</button>
+        </div>
+        {loading && <Spinner/>}
+        {foundUser && (
+          <div className="card">
+            <div style={{fontWeight:700,fontSize:16,marginBottom:4}}>{foundUser.full_name||'—'}</div>
+            <div style={{fontSize:13,color:'var(--txt2)',marginBottom:10}}>@{foundUser.username||'—'} · {foundUser.tg_id}</div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:12}}>
+              <div style={{background:'var(--bg)',borderRadius:8,padding:'8px 10px',textAlign:'center'}}>
+                <div style={{fontWeight:800}}>{fmt(foundUser.tenge_balance||0)} ₸</div>
+                <div style={{fontSize:11,color:'var(--txt2)'}}>Баланс ₸</div>
+              </div>
+              <div style={{background:'var(--bg)',borderRadius:8,padding:'8px 10px',textAlign:'center'}}>
+                <div style={{fontWeight:800}}>{fmtT(foundUser.token_balance||0)}</div>
+                <div style={{fontSize:11,color:'var(--txt2)'}}>Токены</div>
+              </div>
+            </div>
+            <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:10}}>
+              <button className={`btn-sm ${foundUser.is_whitelisted?'btn-sm-gray':'btn-sm-green'}`} onClick={toggleWl}>
+                {foundUser.is_whitelisted?'Убрать из WL':'В Whitelist'}
+              </button>
+              {foundUser.is_banned
+                ? <button className="btn-sm btn-sm-green" onClick={unbanUser}>Разбанить</button>
+                : <button className="btn-sm btn-sm-red" onClick={banUser}>Забанить</button>
+              }
+            </div>
+            <div className="adm-row">
+              <input className="adm-input" type="number" placeholder="Токены" value={giveAmt} onChange={e=>setGiveAmt(e.target.value)}/>
+              <button className="btn-sm btn-sm-blue" onClick={giveTokens}>Начислить</button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (view === 'receipt') {
+    const [rQuery,  setRQuery]  = useState('');
+    const [rResult, setRResult] = useState(null);
+    const searchReceipt = async () => {
+      const q = rQuery.trim();
+      if (!q) return;
+      setLoading(true); setRResult(null);
+      try { const d = await api(`/api/admin/receipt?q=${encodeURIComponent(q)}`); setRResult(d); }
+      catch(e) { toast(e.message); } finally { setLoading(false); }
+    };
+    const fmtDate = s => s ? new Date(s).toLocaleString('ru-RU', {day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—';
+    return (
+      <div className="screen">
+        <Back/><h2 style={{marginBottom:14}}>Поиск по чеку</h2>
+        <div className="adm-row">
+          <input className="adm-input" placeholder="Напр. QR38748288912" value={rQuery}
+            onChange={e=>setRQuery(e.target.value)} onKeyDown={e=>e.key==='Enter'&&searchReceipt()}/>
+          <button className="btn-sm btn-sm-blue" onClick={searchReceipt}>Найти</button>
+        </div>
+        {loading && <Spinner/>}
+        {rResult && (
+          <div className="card" style={{marginTop:12}}>
+            <div style={{fontSize:11,color:'var(--txt2)',marginBottom:2}}>Чек</div>
+            <div style={{fontWeight:700,fontSize:15,marginBottom:10,wordBreak:'break-all'}}>{rResult.receipt_id}</div>
+            <div style={{fontSize:11,color:'var(--txt2)',marginBottom:2}}>Оплачен</div>
+            <div style={{fontSize:13,marginBottom:10}}>{fmtDate(rResult.used_at)}</div>
+            <div style={{borderTop:'1px solid var(--card-b)',paddingTop:10,marginBottom:8}}>
+              <div style={{fontWeight:700,fontSize:15}}>{rResult.full_name||'—'}</div>
+              <div style={{fontSize:13,color:'var(--txt2)'}}>@{rResult.username||'—'} · {rResult.user_id}</div>
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:10}}>
+              <div style={{background:'var(--bg)',borderRadius:8,padding:'8px 10px',textAlign:'center'}}>
+                <div style={{fontWeight:800}}>{fmt(rResult.tenge_balance||0)} ₸</div>
+                <div style={{fontSize:11,color:'var(--txt2)'}}>Баланс ₸</div>
+              </div>
+              <div style={{background:'var(--bg)',borderRadius:8,padding:'8px 10px',textAlign:'center'}}>
+                <div style={{fontWeight:800}}>{fmtT(rResult.token_balance||0)}</div>
+                <div style={{fontSize:11,color:'var(--txt2)'}}>Токены</div>
+              </div>
+            </div>
+            {rResult.payment && (
+              <div style={{borderTop:'1px solid var(--card-b)',paddingTop:10}}>
+                <div style={{fontSize:12,color:'var(--txt2)',marginBottom:6}}>Связанный платёж</div>
+                <div style={{display:'flex',justifyContent:'space-between',fontSize:13,marginBottom:4}}>
+                  <span style={{color:'var(--txt2)'}}>Сумма</span>
+                  <b>{fmt(rResult.payment.amount_tenge)} ₸</b>
+                </div>
+                {rResult.payment.tokens_amount > 0 && (
+                  <div style={{display:'flex',justifyContent:'space-between',fontSize:13,marginBottom:4}}>
+                    <span style={{color:'var(--txt2)'}}>Токены</span>
+                    <b>{fmtT(rResult.payment.tokens_amount)}</b>
+                  </div>
+                )}
+                <div style={{display:'flex',justifyContent:'space-between',fontSize:13,marginBottom:4}}>
+                  <span style={{color:'var(--txt2)'}}>Назначение</span>
+                  <b>{rResult.payment.purpose||'—'}</b>
+                </div>
+                <div style={{display:'flex',justifyContent:'space-between',fontSize:13,marginBottom:4}}>
+                  <span style={{color:'var(--txt2)'}}>Статус</span>
+                  {statusTag(rResult.payment.status)}
+                </div>
+                <div style={{display:'flex',justifyContent:'space-between',fontSize:13}}>
+                  <span style={{color:'var(--txt2)'}}>Создан</span>
+                  <b>{fmtDate(rResult.payment.created_at)}</b>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (view === 'prices') {
+    const save = async () => {
+      try {
+        await api('/api/admin/prices', { method:'POST', body:JSON.stringify({ price_sim:parseInt(priceSim)||undefined, price_ai:parseInt(priceAi)||undefined, price_both:parseInt(priceBoth)||undefined }) });
+        toast('Цены обновлены');
+      } catch(e) { toast(e.message); }
+    };
+    return (
+      <div className="screen">
+        <Back/><h2 style={{marginBottom:14}}>Цены Turnitin</h2>
+        {[['Плагиат (sim)', priceSim, setPriceSim],['AI-детекция', priceAi, setPriceAi],['Оба отчёта', priceBoth, setPriceBoth]].map(([l,v,s])=>(
+          <div key={l} className="price-row">
+            <span className="price-label">{l}</span>
+            <input className="adm-input" type="number" value={v} onChange={e=>s(e.target.value)} style={{maxWidth:120}}/>
+            <span style={{fontSize:13,color:'var(--txt2)'}}>₸</span>
+          </div>
+        ))}
+        <button className="btn btn-primary" style={{marginTop:8}} onClick={save}>Сохранить</button>
+      </div>
+    );
+  }
+
+  if (view === 'settings') {
+    const saveSetting = async (key, value) => {
+      try { await api('/api/admin/settings', { method:'POST', body:JSON.stringify({ key, value }) }); toast('Сохранено'); }
+      catch(e) { toast(e.message); }
+    };
+    const FIELDS = [
+      { key:'turnitin_email',     label:'Turnitin Email',    type:'email' },
+      { key:'turnitin_password',  label:'Turnitin Пароль',   type:'password' },
+      { key:'turnitin_class_id',  label:'Class ID (обычная)',type:'text' },
+      { key:'turnitin_assign_id', label:'Assignment ID (обычная)', type:'text' },
+      { key:'turnitin_class_id_premium',  label:'Premium Class ID',     type:'text' },
+      { key:'turnitin_assign_id_premium', label:'Premium Assignment ID',type:'text' },
+      { key:'premium_multiplier', label:'Множитель премиум (×)', type:'text' },
+      { key:'kaspi_phone',        label:'Kaspi Телефон',     type:'text' },
+      { key:'kaspi_recipient_name', label:'Kaspi Получатель',type:'text' },
+      { key:'help_username',      label:'Поддержка @username',type:'text' },
+      { key:'help_phone',         label:'Поддержка Телефон', type:'text' },
+    ];
+    return (
+      <div className="screen">
+        <Back/><h2 style={{marginBottom:14}}>Настройки</h2>
+        {loading ? <Spinner/> : FIELDS.map(f => (
+          <div key={f.key} className="setting-row">
+            <div className="setting-label">{f.label}</div>
+            <div className="adm-row">
+              <input className="adm-input" type={f.type} value={settingEdit[f.key]||''} onChange={e=>setSettingEdit(p=>({...p,[f.key]:e.target.value}))}/>
+              <button className="btn-sm btn-sm-blue" onClick={()=>saveSetting(f.key,settingEdit[f.key]||'')} style={{display:'flex',alignItems:'center'}}>{React.cloneElement(ICONS.check,{width:16,height:16})}</button>
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (view === 'rental_services') {
+    const saveSvc = async () => {
+      if (!svcForm.name.trim()) { toast('Введите название'); return; }
+      try {
+        await api('/api/admin/rental/service', { method:'POST', body: JSON.stringify({
+          name: svcForm.name.trim(), icon: svcForm.icon.trim(), description: svcForm.description.trim(),
+        })});
+        toast('Сервис добавлен'); setSvcForm({ name:'', icon:'', description:'' }); await loadRentSvcs();
+      } catch(e) { toast('Ошибка: '+e.message); }
+    };
+    const toggleSvc = async (s) => {
+      try {
+        await api('/api/admin/rental/service', { method:'POST', body: JSON.stringify({
+          id: s.id, name: s.name, icon: s.icon, description: s.description,
+          is_active: !s.is_active, sort_order: s.sort_order,
+        })});
+        await loadRentSvcs();
+      } catch(e) { toast('Ошибка: '+e.message); }
+    };
+    const saveTariff = async (svcId) => {
+      const h = parseInt(tariffForm.hours), p = parseFloat(tariffForm.price);
+      if (!tariffForm.name.trim() || !h || !p) { toast('Название, часы и цена обязательны'); return; }
+      try {
+        await api('/api/admin/rental/tariff', { method:'POST', body: JSON.stringify({
+          service_id: svcId, name: tariffForm.name.trim(), duration_hours: h, price: p,
+        })});
+        toast('Тариф добавлен'); setTariffForm({ svc:null, name:'', hours:'', price:'' }); await loadRentSvcs();
+      } catch(e) { toast('Ошибка: '+e.message); }
+    };
+    const toggleTariff = async (t) => {
+      try {
+        await api('/api/admin/rental/tariff', { method:'POST', body: JSON.stringify({
+          id: t.id, service_id: t.service_id, name: t.name, duration_hours: t.duration_hours,
+          price: t.price, is_active: !t.is_active, sort_order: t.sort_order,
+        })});
+        await loadRentSvcs();
+      } catch(e) { toast('Ошибка: '+e.message); }
+    };
+    return (
+      <div className="screen">
+        <Back/><h2 style={{marginBottom:14}}>Аренда: каталог</h2>
+        <div className="sec-title">Новый сервис</div>
+        <div className="adm-row">
+          <input className="adm-input" placeholder="Название (ChatGPT Plus)" value={svcForm.name} onChange={e=>setSvcForm(f=>({...f,name:e.target.value}))}/>
+          <input className="adm-input" placeholder="openai / 🤖" style={{maxWidth:110,textAlign:'center'}} value={svcForm.icon} onChange={e=>setSvcForm(f=>({...f,icon:e.target.value}))}/>
+        </div>
+        <div className="adm-row">
+          <input className="adm-input" placeholder="Описание (короткое)" value={svcForm.description} onChange={e=>setSvcForm(f=>({...f,description:e.target.value}))}/>
+          <button className="btn-sm btn-sm-green" onClick={saveSvc}>Добавить</button>
+        </div>
+        {loading ? <Spinner/> : rentSvcs.map(s => (
+          <div key={s.id} className="card" style={{padding:14,opacity: s.is_active?1:.55}}>
+            <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8}}>
+              <RentIcon icon={s.icon} size={20}/>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontWeight:700,fontSize:15}}>{s.name}</div>
+                <div style={{fontSize:11,color:'var(--txt2)'}}>свободно {s.cnt_free} · аренда {s.cnt_rented} · ремонт {s.cnt_maintenance}{s.waiting?` · ждут ${s.waiting}`:''}</div>
+              </div>
+              <button className={`btn-sm ${s.is_active?'btn-sm-gray':'btn-sm-green'}`} onClick={()=>toggleSvc(s)}>{s.is_active?'Скрыть':'Вкл'}</button>
+            </div>
+            {(s.tariffs||[]).map(t => (
+              <div key={t.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'7px 0',borderTop:'1px solid var(--card-b)',fontSize:13,opacity:t.is_active?1:.5}}>
+                <span>{t.name} · {durationLabel(t.duration_hours)}</span>
+                <span style={{display:'flex',alignItems:'center',gap:8}}>
+                  <b>{fmt(t.price)} ₸</b>
+                  <button className="btn-sm btn-sm-gray" style={{padding:'4px 8px',fontSize:11}} onClick={()=>toggleTariff(t)}>{t.is_active?'Выкл':'Вкл'}</button>
+                </span>
+              </div>
+            ))}
+            {tariffForm.svc === s.id ? (
+              <div className="adm-row" style={{marginTop:8,marginBottom:0}}>
+                <input className="adm-input" placeholder="6 часов" value={tariffForm.name} onChange={e=>setTariffForm(f=>({...f,name:e.target.value}))}/>
+                <input className="adm-input" type="number" placeholder="ч" style={{maxWidth:58}} value={tariffForm.hours} onChange={e=>setTariffForm(f=>({...f,hours:e.target.value}))}/>
+                <input className="adm-input" type="number" placeholder="₸" style={{maxWidth:74}} value={tariffForm.price} onChange={e=>setTariffForm(f=>({...f,price:e.target.value}))}/>
+                <button className="btn-sm btn-sm-green" onClick={()=>saveTariff(s.id)}>{React.cloneElement(ICONS.check,{width:15,height:15})}</button>
+              </div>
+            ) : (
+              <button className="btn-sm btn-sm-blue" style={{marginTop:8}} onClick={()=>setTariffForm({ svc:s.id, name:'', hours:'', price:'' })}>+ Тариф</button>
+            )}
+          </div>
+        ))}
+        {!loading && rentSvcs.length === 0 && <p className="empty">Сервисов пока нет</p>}
+      </div>
+    );
+  }
+
+  if (view === 'rental_accounts') {
+    const accs = rentSvcSel ? rentAccs.filter(a => a.service_id === rentSvcSel) : rentAccs;
+    const svcName = (id) => (rentSvcs.find(s => s.id === id) || {}).name || `#${id}`;
+    const addAcc = async () => {
+      if (!rentSvcSel) { toast('Сначала выберите сервис'); return; }
+      if (!accForm.login.trim() || !accForm.password) { toast('Логин и пароль обязательны'); return; }
+      try {
+        await api('/api/admin/rental/account', { method:'POST', body: JSON.stringify({
+          service_id: rentSvcSel, login: accForm.login.trim(), password: accForm.password, note: accForm.note,
+        })});
+        toast('Аккаунт добавлен'); setAccForm({ login:'', password:'', note:'' });
+        await Promise.all([loadRentAccs(), loadRentSvcs()]);
+      } catch(e) { toast('Ошибка: '+e.message); }
+    };
+    const setStatus = async (a, status) => {
+      try {
+        await api('/api/admin/rental/account/update', { method:'POST', body: JSON.stringify({ id:a.id, status })});
+        toast(status === 'free' ? 'В пуле (waitlist уведомлён)' : 'Обновлено');
+        await Promise.all([loadRentAccs(), loadRentSvcs()]);
+      } catch(e) { toast('Ошибка: '+e.message); }
+    };
+    const rotatePass = async (a) => {
+      const np = window.prompt(`Новый пароль для ${a.login}:`);
+      if (!np) return;
+      try {
+        await api('/api/admin/rental/account/update', { method:'POST', body: JSON.stringify({ id:a.id, password:np })});
+        toast('Пароль обновлён'); await loadRentAccs();
+      } catch(e) { toast('Ошибка: '+e.message); }
+    };
+    const delAcc = async (a) => {
+      if (!window.confirm(`Удалить аккаунт ${a.login}?`)) return;
+      try {
+        await api('/api/admin/rental/account/delete', { method:'POST', body: JSON.stringify({ id:a.id })});
+        toast('Удалён'); await Promise.all([loadRentAccs(), loadRentSvcs()]);
+      } catch(e) { toast('Ошибка: '+e.message); }
+    };
+    const ACC_TAG = { free:['Свободен','tag-green'], rented:['Арендован','tag-blue'], maintenance:['Ремонт','tag-yellow'], disabled:['Выключен','tag-gray'] };
+    return (
+      <div className="screen">
+        <Back/><h2 style={{marginBottom:14}}>Аренда: склад</h2>
+        <div className="pill-row">
+          {rentSvcs.map(s => (
+            <button key={s.id} className={`pill ${rentSvcSel===s.id?'on':''}`} style={{display:'inline-flex',alignItems:'center',gap:6}} onClick={()=>setRentSvcSel(rentSvcSel===s.id?null:s.id)}>
+              <RentIcon icon={s.icon} size={14}/> {s.name} · {s.cnt_free}
+            </button>
+          ))}
+        </div>
+        {rentSvcSel && <>
+          <div className="adm-row">
+            <input className="adm-input" placeholder="Логин / email" value={accForm.login} onChange={e=>setAccForm(f=>({...f,login:e.target.value}))}/>
+            <input className="adm-input" placeholder="Пароль" value={accForm.password} onChange={e=>setAccForm(f=>({...f,password:e.target.value}))}/>
+          </div>
+          <div className="adm-row">
+            <input className="adm-input" placeholder="Заметка (необязательно)" value={accForm.note} onChange={e=>setAccForm(f=>({...f,note:e.target.value}))}/>
+            <button className="btn-sm btn-sm-green" onClick={addAcc}>Добавить</button>
+          </div>
+        </>}
+        {loading ? <Spinner/> : accs.map(a => {
+          const [lbl, cls] = ACC_TAG[a.status] || [a.status,'tag-gray'];
+          return (
+            <div key={a.id} className="card" style={{padding:'12px 14px'}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontWeight:700,fontSize:14,wordBreak:'break-all'}}>{a.login}</div>
+                  <div style={{fontSize:12,color:'var(--txt2)',marginTop:2,cursor:'pointer'}} onClick={()=>setShowPass(p=>({...p,[a.id]:!p[a.id]}))}>
+                    {showPass[a.id] ? a.password : '••••••••'} {!rentSvcSel && `· ${svcName(a.service_id)}`}{a.note ? ` · ${a.note}` : ''}
+                  </div>
+                </div>
+                <span className={`tag ${cls}`}>{lbl}</span>
+              </div>
+              <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:9}}>
+                {a.status !== 'rented' && <>
+                  {a.status !== 'free' && <button className="btn-sm btn-sm-green" onClick={()=>setStatus(a,'free')}>Свободен</button>}
+                  {a.status === 'free' && <button className="btn-sm btn-sm-gray" onClick={()=>setStatus(a,'maintenance')}>В ремонт</button>}
+                  <button className="btn-sm btn-sm-blue" onClick={()=>rotatePass(a)}>Пароль</button>
+                  <button className="btn-sm btn-sm-red" onClick={()=>delAcc(a)}>Удалить</button>
+                </>}
+                {a.status === 'rented' && <span style={{fontSize:12,color:'var(--txt2)'}}>Аренда #{a.current_order_id} — отмена в «Аренда: активные»</span>}
+              </div>
+            </div>
+          );
+        })}
+        {!loading && accs.length === 0 && <p className="empty">{rentSvcSel ? 'Склад пуст — добавьте аккаунты' : 'Выберите сервис или добавьте его в каталоге'}</p>}
+      </div>
+    );
+  }
+
+  if (view === 'rental_orders') {
+    const cancelRent = async (r) => {
+      if (!window.confirm(`Отменить аренду #${r.id} (${r.service_name}) и вернуть ${fmt(r.amount_tenge)} ₸?`)) return;
+      try {
+        const d = await api('/api/admin/rental/cancel', { method:'POST', body: JSON.stringify({ order_id: r.id })});
+        toast(`Отменено · возврат ${fmt(d.refunded||0)} ₸`); await loadRentOrders();
+      } catch(e) { toast('Ошибка: '+e.message); }
+    };
+    return (
+      <div className="screen">
+        <Back/><h2 style={{marginBottom:14}}>Аренда: активные</h2>
+        {loading ? <Spinner/> : rentOrders.map(r => (
+          <div key={r.id} className="order-row">
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontWeight:600,fontSize:14}}>#{r.id} · {r.service_name} · @{r.username||r.user_id}</div>
+              <div className="order-meta">{r.account_login} · <b>{fmt(r.amount_tenge)} ₸</b> · ещё <Countdown expiresAt={r.expires_at}/></div>
+            </div>
+            <button className="btn-sm btn-sm-red" onClick={()=>cancelRent(r)}>Отменить</button>
+          </div>
+        ))}
+        {!loading && rentOrders.length === 0 && <p className="empty">Активных аренд нет</p>}
+      </div>
+    );
+  }
+
+  if (view === 'cleanup') {
+    const doClean = async () => {
+      setCleaning(true);
+      try { const d = await api('/api/admin/cleanup', { method:'POST' }); toast(`Удалено: uploads=${d.deleted_uploads} reports=${d.deleted_reports}`); }
+      catch(e) { toast('Ошибка: '+e.message); } finally { setCleaning(false); }
+    };
+    return (
+      <div className="screen">
+        <Back/><h2 style={{marginBottom:14}}>Очистка кэша</h2>
+        <div className="cleanup-box">
+          <p>Закрывает браузер Playwright и удаляет старые файлы. Используйте если Turnitin возвращает старые результаты или растёт Memory Usage в Docker.</p>
+          <p style={{marginTop:8,fontSize:13,color:'var(--txt2)'}}>Очередь, бан-лист, статистика и история заказов сохраняются — удаляются только кэш браузера и старые загруженные файлы.</p>
+        </div>
+        <button className="btn btn-primary" style={{background:'#dc2626',display:'flex',alignItems:'center',justifyContent:'center',gap:8}} onClick={doClean} disabled={cleaning}>
+          {cleaning ? <><span className="spinner-sm"/> Очищаю…</> : <>{React.cloneElement(ICONS.trash,{width:17,height:17})} Запустить очистку</>}
+        </button>
+      </div>
+    );
+  }
+
+  return null;
+}
+
+// ── App ──────────────────────────────────────────────────────────────────────
+function App() {
+  const [tab,    setTab]    = useState('home');
+  const [user,   setUser]   = useState(null);
+  const [orders, setOrd]    = useState([]);
+  const [loading,setLoad]   = useState(true);
+  const [toast,  showToast] = useToast();
+
+  const load = useCallback(async () => {
+    try {
+      const [me, ord] = await Promise.all([api('/api/me'), api('/api/orders')]);
+      setUser(me); setOrd(ord.orders || []);
+    } catch(e) { showToast('Ошибка загрузки: ' + e.message); }
+    finally { setLoad(false); }
+  }, []);
+
+  useEffect(() => {
+    tg?.ready();
+    tg?.expand();
+    load();
+  }, []);
+
+  // Частичное обновление баланса без полной перезагрузки
+  const updateBalance = (patch) => setUser(u => u ? {...u, ...patch} : u);
+
+  // Turnitin и Хуманайзер открываются с карточек Главной — в навбаре их нет
+  const TABS = [
+    { id:'home',   icon:'home',   label:'Главная' },
+    { id:'rental', icon:'key',    label:'Аренда'  },
+    { id:'wallet', icon:'wallet', label:'Кошелёк' },
+    { id:'profile',icon:'user',   label:'Профиль' },
+    ...(user?.is_admin ? [{ id:'admin', icon:'shield', label:'Админ' }] : []),
+  ];
+  const navActive = ({ turnitin:'home', humanizer:'home' })[tab] || tab;
+
+  if (loading) return <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh'}}><Spinner/></div>;
+
+  return (
+    <>
+      <Toast msg={toast}/>
+      {tab==='home'      && <HomeScreen     user={user} orders={orders} onNav={setTab}/>}
+      {tab==='turnitin'  && <TurnitinScreen user={user} prices={user?.prices} premiumMult={user?.premium_multiplier||1.5} onNav={setTab} onBalanceUpdate={updateBalance}/>}
+      {tab==='humanizer' && <HumanizerScreen user={user} onNav={setTab} onBalanceUpdate={b => updateBalance({token_balance:b})}/>}
+      {tab==='rental'    && <RentalScreen   user={user} onNav={setTab} onBalanceUpdate={updateBalance}/>}
+      {tab==='wallet'    && <WalletScreen   user={user} packages={user?.packages} onRefresh={load} onBalanceUpdate={updateBalance}/>}
+      {tab==='profile'   && <ProfileScreen  user={user} orders={orders}/>}
+      {tab==='admin'     && <AdminScreen    toast={showToast}/>}
+      <nav className="nav">
+        {TABS.map(t => (
+          <button key={t.id} className={`nav-btn ${navActive===t.id?'active':''}`} onClick={() => setTab(t.id)}>
+            {ICONS[t.icon]}
+            <span className="nav-label">{t.label}</span>
+          </button>
+        ))}
+      </nav>
+    </>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App/>);
+</script>
+</body>
+</html>
