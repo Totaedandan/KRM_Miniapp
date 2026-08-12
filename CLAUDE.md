@@ -17,7 +17,7 @@ Telegram-бот для проверки работ через **Turnitin** (пл
 - `config.py` — `settings` (pydantic-settings, читает `.env`). Обязательны: `BOT_TOKEN`, `SUPERADMIN_ID`. `ADMIN_IDS` (через запятую) + суперадмин проходят флоу **бесплатно** (как whitelist) — `settings.is_admin(tg_id)`.
 - `api.py` — FastAPI: эндпоинты Mini App (`/api/...`) + админские (`/api/admin/...`). Авторизация — через Telegram `initData` (заголовок `X-Telegram-Init-Data`).
 - `bot_sender.py` — отправка сообщений из FastAPI через HTTP Bot API (без aiogram).
-- `database/db.py` — весь доступ к SQLite. Таблицы: `users`, `turnitin_orders`, `payments`, `kaspi_receipts`, `settings`, `banned_usernames`, `transactions` (ledger). Динамические настройки (цены, реквизиты, Turnitin-креды) — в таблице `settings`.
+- `database/db.py` — весь доступ к SQLite. Таблицы: `users`, `turnitin_orders`, `payments`, `kaspi_receipts`, `settings`, `banned_usernames`, `transactions` (ledger), `promo_codes`, `promo_redemptions`. Динамические настройки (цены, реквизиты, Turnitin-креды) — в таблице `settings`.
 - `services/`
   - `turnitin_service.py` — Playwright-автоматизация Turnitin. На Linux сам поднимает Xvfb (headful Chromium). `process(...)` загружает файл, ждёт отчёт, возвращает пути sim/ai. `cleanup(...)` закрывает браузер + чистит старые файлы.
   - `queue_manager.py` — очередь заказов Turnitin (см. ниже).
@@ -121,6 +121,41 @@ reason, balance_after, idempotency_key UNIQUE). Колонки `users.tenge_bala
 - Бэкфилл в `init_db`: старые балансы заносятся как `opening_balance` (ключ `opening:<cur>:<tg_id>`).
 - Админка: `GET /api/admin/transactions?q=` (история), `GET /api/admin/ledger_check` (сверка
   кэша с журналом, `reconcile_balances()` → пустой список = всё сходится).
+
+## Промокоды (РЕАЛИЗОВАНО)
+
+- **Таблицы**: `promo_codes` (`code` UNIQUE uppercase, `type` fixed|percent, `value`,
+  `per_user_limit`, `total_limit` NULL=безлимит, `activations_count`, `starts_at/ends_at`
+  naive-UTC, `is_deleted` soft-delete), `promo_redemptions` (история активаций, по ней же
+  считается лимит на пользователя).
+- Бонус всегда идёт в `tenge_balance` через ledger с отдельным `reason`
+  (`promo_fixed`/`promo_percent`) — отдельной колонки под «бонусный баланс» нет,
+  трассируемость — через `transactions.reason`.
+- **fixed** — редимится мгновенно кнопкой в Mini App (`POST /api/promo/apply`) →
+  `db.apply_promo_fixed`. **percent** — привязывается к пополнению баланса: превью через
+  тот же `/api/promo/apply` (`db.validate_promo_for_topup`, без консьюминга), код едет в
+  `pending_action`/FSM вместе с суммой топ-апа (`api.py::init_topup` →
+  `payment.py::receive_topup_kaspi_pdf`) и реально консьюмится там же —
+  `db.redeem_promo_percent(user_id, code, base_amount)` — сразу после зачисления базовой
+  суммы. Percent — best-effort: любая невалидность на этом шаге НЕ откатывает уже
+  прошедшее пополнение, просто бонус не начисляется.
+- Лимиты — тем же guard-UPDATE паттерном, что и списание баланса/захват аккаунта аренды
+  (`UPDATE ... WHERE activations_count<total_limit`, `rowcount==0` → `PromoExhausted`).
+- 4 текста ошибок (`db.PROMO_ERROR_MESSAGES`) 1:1 на исключения `PromoNotFound/
+  PromoNotActive/PromoExhausted/PromoAlreadyUsed`.
+- Редимится **только в Mini App** (вкладка «Кошелёк»), без bot-команды.
+  Админка промокодов (создание/список со статусом/удаление) — тоже только Mini App
+  (`GET|POST /api/admin/promo`, `POST /api/admin/promo/delete`), без bot-команд —
+  по прецеденту раздела «Аренда».
+- Smoke-тест: `python _test_promo_db.py`.
+
+## Рассылка (РЕАЛИЗОВАНО)
+
+- `POST /api/admin/broadcast {text}` (Mini App, только админ) — берёт всех
+  `database.get_all_user_ids(exclude_banned=True)`, кладёт `_run_broadcast` в фоновый
+  `asyncio.create_task` (не блокирует HTTP-запрос) и сразу отвечает `{total}`.
+  `_run_broadcast` шлёт через `bot_sender.send_message` с `sleep(0.05)` между сообщениями
+  (~20 msg/s), по завершении шлёт админу личным сообщением сводку sent/failed.
 
 ## Docker
 

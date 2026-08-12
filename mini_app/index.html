@@ -126,7 +126,7 @@
     .topup-custom input::placeholder { color: var(--txt2); font-weight: 500; }
 
     /* Token packages */
-    .pkg-card { background: var(--card); border: 1px solid var(--card-b); border-radius: var(--r-xl); padding: 18px; margin-bottom: 10px; cursor: pointer; transition: border-color .18s ease, transform 160ms var(--ease-out); }
+    .pkg-card { display: block; width: 100%; box-sizing: border-box; background: var(--card); border: 1px solid var(--card-b); border-radius: var(--r-xl); padding: 18px; margin-bottom: 10px; cursor: pointer; transition: border-color .18s ease, transform 160ms var(--ease-out); }
     .pkg-card:active { transform: scale(0.985); border-color: var(--card-b2); }
     .pkg-card.pop { border-color: var(--accent-bd); }
     .pkg-card.disabled { opacity: .5; cursor: not-allowed; }
@@ -484,6 +484,8 @@ function TurnitinScreen({ user, prices, premiumMult, onNav, onBalanceUpdate }) {
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(null); // { order_id, is_premium }
   const [premium, setPremium] = useState(false);
+  const [useBonus, setUseBonus] = useState(true);
+  const bonusBal = Number(user?.bonus_balance || 0);
   // Ключ идемпотентности: один на попытку заказа. Сохраняется при ретраях того
   // же заказа (двойной тап / потеря ответа) — сервер не спишет дважды.
   const reqIdRef = useRef(null);
@@ -499,10 +501,11 @@ function TurnitinScreen({ user, prices, premiumMult, onNav, onBalanceUpdate }) {
   };
 
   const choose = async (type, price) => {
-    const balance = Number(user?.tenge_balance || 0);
-    const isWl    = user?.is_whitelisted;
-    if (!isWl && balance < price) {
-      showToast(`Нужно ${fmt(price)} ₸, у вас ${fmt(balance)} ₸`);
+    const balance   = Number(user?.tenge_balance || 0);
+    const spendable = balance + (useBonus ? bonusBal : 0);
+    const isWl      = user?.is_whitelisted;
+    if (!isWl && spendable < price) {
+      showToast(`Нужно ${fmt(price)} ₸, у вас ${fmt(spendable)} ₸`);
       setTimeout(() => onNav('wallet'), 1200);
       return;
     }
@@ -513,10 +516,10 @@ function TurnitinScreen({ user, prices, premiumMult, onNav, onBalanceUpdate }) {
         (Date.now() + '-' + Math.random().toString(36).slice(2));
     }
     try {
-      const res = await api('/api/order', { method:'POST', body: JSON.stringify({ report_type: type, is_premium: premium, request_id: reqIdRef.current }) });
+      const res = await api('/api/order', { method:'POST', body: JSON.stringify({ report_type: type, is_premium: premium, request_id: reqIdRef.current, use_bonus: useBonus }) });
       reqIdRef.current = null;         // успех — следующий заказ получит новый ключ
       setSuccess({ order_id: res.order_id, is_premium: res.is_premium });
-      onBalanceUpdate && onBalanceUpdate({ tenge_balance: res.balance });
+      onBalanceUpdate && onBalanceUpdate({ tenge_balance: res.balance, bonus_balance: res.bonus_balance });
     } catch(e) {
       showToast(e.message);    // ключ сохраняем: ретрай дедуплицируется
     } finally {
@@ -561,10 +564,17 @@ function TurnitinScreen({ user, prices, premiumMult, onNav, onBalanceUpdate }) {
         </button>
       </div>
 
+      {bonusBal > 0 && (
+        <div className="adm-row" style={{marginBottom:14,justifyContent:'space-between'}}>
+          <span style={{fontSize:13}}>Списать бонусы ({fmt(bonusBal)} ₸)</span>
+          <button className={`toggle ${useBonus?'on':''}`} onClick={()=>setUseBonus(v=>!v)}/>
+        </div>
+      )}
+
       <div className="sec-title">Выберите тип проверки</div>
       {checks.map(c => {
         const price  = priceFor(c.priceKey);
-        const canPay = user?.is_whitelisted || Number(user?.tenge_balance||0) >= price;
+        const canPay = user?.is_whitelisted || (Number(user?.tenge_balance||0) + (useBonus?bonusBal:0)) >= price;
         return (
           <button key={c.type} className={`check-card ${!canPay ? 'insufficient' : ''}`}
             onClick={() => !loading && choose(c.type, price)} disabled={loading}>
@@ -724,23 +734,79 @@ function HumanizerScreen({ user, onNav, onBalanceUpdate }) {
 function WalletScreen({ user, packages, onRefresh, onBalanceUpdate }) {
   const [toast, showToast]     = useToast();
   const [customAmt, setCustomAmt] = useState('');
-  const [kaspiInfo, setKaspiInfo] = useState(null);  // после topup init
+  const [phoneInput, setPhoneInput] = useState('');
+  const [waitingPayment, setWaitingPayment] = useState(null); // {payment_id, amount, phone_number}
+  const [pollTimedOut, setPollTimedOut] = useState(false);
   const [loadingTopup, setLoadingTopup] = useState(false);
   const [loadingPkg,   setLoadingPkg]   = useState(null); // index пакета
   const [localUser, setLocalUser]       = useState(user);
+  const [promoInput,    setPromoInput]    = useState('');
+  const [appliedPromo,  setAppliedPromo]  = useState(null); // {code, percent} — привязан к след. пополнению
+  const [applyingPromo, setApplyingPromo] = useState(false);
 
   // Sync if parent user changes
   React.useEffect(() => setLocalUser(user), [user]);
 
   const AMOUNTS = [1000, 2000, 5000, 10000];
 
+  const applyTopupResult = (res) => {
+    setLocalUser(u => ({ ...u, tenge_balance: res.tenge_balance }));
+    onBalanceUpdate && onBalanceUpdate({ tenge_balance: res.tenge_balance });
+    showToast('Баланс пополнен!');
+    setWaitingPayment(null);
+    setPollTimedOut(false);
+    setCustomAmt('');
+  };
+
+  // Поллинг статуса, пока ждём подтверждения оплаты в Kaspi
+  React.useEffect(() => {
+    if (!waitingPayment || pollTimedOut) return;
+    let attempts = 0;
+    const iv = setInterval(async () => {
+      attempts++;
+      try {
+        const res = await api(`/api/topup/status?payment_id=${waitingPayment.payment_id}`);
+        if (res.status === 'confirmed') {
+          clearInterval(iv);
+          applyTopupResult(res);
+        } else if (['cancelled', 'expired', 'error'].includes(res.status)) {
+          clearInterval(iv);
+          showToast('Оплата не прошла — попробуйте снова');
+          setWaitingPayment(null);
+        } else if (attempts >= 60) {
+          clearInterval(iv);
+          setPollTimedOut(true);
+        }
+      } catch (e) { /* сеть моргнула — пробуем на следующем тике */ }
+    }, 3000);
+    return () => clearInterval(iv);
+  }, [waitingPayment, pollTimedOut]);
+
+  const checkTopupNow = async () => {
+    if (!waitingPayment) return;
+    try {
+      const res = await api(`/api/topup/status?payment_id=${waitingPayment.payment_id}`);
+      if (res.status === 'confirmed') { applyTopupResult(res); return; }
+      if (['cancelled', 'expired', 'error'].includes(res.status)) {
+        showToast('Оплата не прошла — попробуйте снова');
+        setWaitingPayment(null);
+        return;
+      }
+      setPollTimedOut(false); // ещё pending — перезапустить автополлинг
+    } catch (e) { showToast(e.message); }
+  };
+
   const doTopup = async (amount) => {
     const amt = parseFloat(amount);
     if (!amt || amt < 100) { showToast('Минимум 100 ₸'); return; }
+    const phone = phoneInput.trim();
+    if (!/^87\d{9}$/.test(phone)) { showToast('Номер Kaspi в формате 87001234567'); return; }
     setLoadingTopup(true);
     try {
-      const res = await api('/api/topup', { method:'POST', body: JSON.stringify({ amount: amt }) });
-      setKaspiInfo(res);
+      const res = await api('/api/topup', { method:'POST', body: JSON.stringify({ amount: amt, phone_number: phone, promo_code: appliedPromo?.code || null }) });
+      setWaitingPayment({ payment_id: res.payment_id, amount: res.amount, phone_number: res.phone_number });
+      setPollTimedOut(false);
+      setAppliedPromo(null);
     } catch(e) {
       showToast(e.message);
     } finally {
@@ -748,17 +814,44 @@ function WalletScreen({ user, packages, onRefresh, onBalanceUpdate }) {
     }
   };
 
+  const applyPromo = async () => {
+    const code = promoInput.trim();
+    if (!code || applyingPromo) return;
+    setApplyingPromo(true);
+    try {
+      const res = await api('/api/promo/apply', { method:'POST', body: JSON.stringify({ code }) });
+      if (res.type === 'fixed') {
+        setLocalUser(u => ({ ...u, bonus_balance: res.new_bonus_balance }));
+        onBalanceUpdate && onBalanceUpdate({ bonus_balance: res.new_bonus_balance });
+        showToast(`Начислено +${fmt(res.bonus)} ₸ на бонусный баланс`);
+        setPromoInput('');
+      } else {
+        setAppliedPromo({ code: res.code, percent: res.percent });
+        showToast(`Промокод применён — +${res.percent}% к пополнению`);
+        setPromoInput('');
+      }
+    } catch(e) {
+      showToast(e.message);
+    } finally {
+      setApplyingPromo(false);
+    }
+  };
+
+  const bonusBal = Number(localUser?.bonus_balance || 0);
+  const [useBonusTokens, setUseBonusTokens] = useState(true);
+
   const buyTokens = async (pkg, idx) => {
     const bal = Number(localUser?.tenge_balance || 0);
-    if (!localUser?.is_whitelisted && bal < pkg.tenge) {
+    const spendable = bal + (useBonusTokens ? bonusBal : 0);
+    if (!localUser?.is_whitelisted && spendable < pkg.tenge) {
       showToast(`Нужно ${fmt(pkg.tenge)} ₸`);
       return;
     }
     setLoadingPkg(idx);
     try {
-      const res = await api('/api/buy_tokens', { method:'POST', body: JSON.stringify({ tokens: pkg.tokens, tenge: pkg.tenge }) });
-      setLocalUser(u => ({ ...u, token_balance: res.new_token_balance, tenge_balance: res.new_tenge_balance }));
-      onBalanceUpdate && onBalanceUpdate({ token_balance: res.new_token_balance, tenge_balance: res.new_tenge_balance });
+      const res = await api('/api/buy_tokens', { method:'POST', body: JSON.stringify({ tokens: pkg.tokens, tenge: pkg.tenge, use_bonus: useBonusTokens }) });
+      setLocalUser(u => ({ ...u, token_balance: res.new_token_balance, tenge_balance: res.new_tenge_balance, bonus_balance: res.new_bonus_balance }));
+      onBalanceUpdate && onBalanceUpdate({ token_balance: res.new_token_balance, tenge_balance: res.new_tenge_balance, bonus_balance: res.new_bonus_balance });
       showToast(`Начислено +${fmt(pkg.tokens)} токенов`);
     } catch(e) {
       showToast(e.message);
@@ -767,34 +860,34 @@ function WalletScreen({ user, packages, onRefresh, onBalanceUpdate }) {
     }
   };
 
-  // Kaspi payment info modal
-  if (kaspiInfo) return (
+  // Экран ожидания подтверждения оплаты в Kaspi (после создания счёта ApiPay)
+  if (waitingPayment) return (
     <div className="screen">
       <div style={{textAlign:'center',marginBottom:24,marginTop:16}}>
         <div className="ico-badge">{React.cloneElement(ICONS.card,{width:30,height:30})}</div>
-        <h2 style={{marginBottom:8}}>Реквизиты для оплаты</h2>
-        <p style={{marginBottom:0}}>Переведите точную сумму через Kaspi</p>
+        <h2 style={{marginBottom:8}}>Подтвердите оплату</h2>
+        <p style={{marginBottom:0}}>{fmt(waitingPayment.amount)} ₸ · номер {waitingPayment.phone_number}</p>
       </div>
-      <div className="card" style={{marginBottom:16}}>
-        {[
-          ['Получатель', kaspiInfo.kaspi_name],
-          ['Телефон',    kaspiInfo.kaspi_phone],
-          ['Сумма',      `${fmt(kaspiInfo.amount)} ₸`],
-        ].map(([l,v]) => (
-          <div key={l} style={{display:'flex',justifyContent:'space-between',padding:'10px 0',borderBottom:'1px solid var(--card-b)'}}>
-            <span style={{color:'var(--txt2)',fontSize:14}}>{l}</span>
-            <span style={{fontWeight:700,fontSize:14}}>{v}</span>
-          </div>
-        ))}
+      <div className="card" style={{background:'rgba(99,102,241,0.08)',borderColor:'rgba(99,102,241,0.3)',marginBottom:20,textAlign:'center',padding:'20px 16px'}}>
+        {pollTimedOut ? (
+          <>
+            <p style={{color:'var(--txt)',fontSize:13,lineHeight:1.6,marginBottom:14}}>
+              Оплата ещё обрабатывается. Если вы уже подтвердили в Kaspi — подождите немного и проверьте снова.
+            </p>
+            <button className="btn btn-primary" onClick={checkTopupNow}>Проверить снова</button>
+          </>
+        ) : (
+          <>
+            <Spinner/>
+            <p style={{color:'var(--txt)',fontSize:13,lineHeight:1.6,marginTop:14}}>
+              Откройте приложение <b>Kaspi.kz</b> на номере <b>{waitingPayment.phone_number}</b> и подтвердите платёж.<br/>
+              Баланс пополнится автоматически.
+            </p>
+          </>
+        )}
       </div>
-      <div className="card" style={{background:'rgba(99,102,241,0.08)',borderColor:'rgba(99,102,241,0.3)',marginBottom:20}}>
-        <p style={{color:'var(--txt)',fontSize:13,lineHeight:1.6}}>
-          После перевода <b>откройте чат бота</b> и отправьте туда <b>PDF-чек</b> из приложения Kaspi.<br/>
-          Баланс пополнится автоматически.
-        </p>
-      </div>
-      <button className="btn btn-primary" onClick={() => { setKaspiInfo(null); setCustomAmt(''); }}>
-        Понятно
+      <button className="btn-sm btn-sm-gray" style={{width:'100%',justifyContent:'center'}} onClick={() => { setWaitingPayment(null); setPollTimedOut(false); }}>
+        Отменить
       </button>
     </div>
   );
@@ -808,6 +901,12 @@ function WalletScreen({ user, packages, onRefresh, onBalanceUpdate }) {
         <div className="bal-label">Баланс</div>
         <div className="bal-amount">{fmt(localUser?.tenge_balance)} ₸</div>
         <div className="bal-sub">Используется для Turnitin и покупки токенов</div>
+        {bonusBal > 0 && (
+          <div className="bal-tok">
+            <span style={{fontSize:13,fontWeight:600,display:'flex',alignItems:'center',gap:7}}>🎁 Бонусы</span>
+            <span style={{fontSize:16,fontWeight:800}}>{fmt(bonusBal)} ₸</span>
+          </div>
+        )}
         <div className="bal-tok">
           <span style={{fontSize:13,fontWeight:600,display:'flex',alignItems:'center',gap:7}}><Icon name="coins" size={15} color="var(--accent-2)"/> Токены Хуманайзера</span>
           <span style={{fontSize:16,fontWeight:800}}>{fmtT(localUser?.token_balance)}</span>
@@ -815,6 +914,14 @@ function WalletScreen({ user, packages, onRefresh, onBalanceUpdate }) {
       </div>
 
       <div className="sec-title">Пополнить баланс (₸)</div>
+      <div className="topup-custom" style={{marginBottom:10}}>
+        <input
+          type="tel"
+          placeholder="Телефон Kaspi: 87001234567"
+          value={phoneInput}
+          onChange={e => setPhoneInput(e.target.value.replace(/[^\d]/g,'').slice(0,11))}
+        />
+      </div>
       <div className="topup-grid">
         {AMOUNTS.map(a => (
           <button key={a} className="topup-btn" onClick={() => doTopup(a)} disabled={loadingTopup}>
@@ -833,13 +940,39 @@ function WalletScreen({ user, packages, onRefresh, onBalanceUpdate }) {
           {loadingTopup ? '...' : 'Пополнить'}
         </button>
       </div>
-      <p style={{marginBottom:20,fontSize:12}}>
-        Получите реквизиты Kaspi, переведите сумму и отправьте PDF-чек боту.
+      <p style={{marginBottom:14,fontSize:12}}>
+        Придёт уведомление в приложении Kaspi — подтвердите платёж, баланс зачислится автоматически.
       </p>
 
+      <div className="topup-custom">
+        <input
+          type="text"
+          placeholder="Промокод"
+          value={promoInput}
+          onChange={e => setPromoInput(e.target.value.toUpperCase())}
+          onKeyDown={e => e.key === 'Enter' && applyPromo()}
+        />
+        <button className="btn-sm btn-sm-blue" onClick={applyPromo} disabled={applyingPromo || !promoInput.trim()}>
+          {applyingPromo ? '...' : 'Применить'}
+        </button>
+      </div>
+      {appliedPromo && (
+        <div className="card" style={{background:'rgba(34,197,94,0.08)',borderColor:'rgba(34,197,94,0.3)',marginTop:10,padding:'10px 14px',display:'flex',justifyContent:'space-between',alignItems:'center',gap:8}}>
+          <span style={{fontSize:13}}>🎁 Промокод <b>{appliedPromo.code}</b> — +{appliedPromo.percent}% к следующему пополнению</span>
+          <button onClick={() => setAppliedPromo(null)} style={{background:'none',border:'none',color:'var(--txt2)',fontSize:16,cursor:'pointer',padding:'0 4px',flexShrink:0}}>✕</button>
+        </div>
+      )}
+      <div style={{marginBottom:20}}/>
+
       <div className="sec-title">Купить токены Хуманайзера</div>
+      {bonusBal > 0 && (
+        <div className="adm-row" style={{marginBottom:10,justifyContent:'space-between'}}>
+          <span style={{fontSize:13}}>Списать бонусы ({fmt(bonusBal)} ₸)</span>
+          <button className={`toggle ${useBonusTokens?'on':''}`} onClick={()=>setUseBonusTokens(v=>!v)}/>
+        </div>
+      )}
       {(packages || []).map((pkg, i) => {
-        const canPay = localUser?.is_whitelisted || Number(localUser?.tenge_balance||0) >= pkg.tenge;
+        const canPay = localUser?.is_whitelisted || (Number(localUser?.tenge_balance||0) + (useBonusTokens?bonusBal:0)) >= pkg.tenge;
         const isLoading = loadingPkg === i;
         return (
           <button key={i} className={`pkg-card ${i===1?'pop':''} ${!canPay?'disabled':''}`}
@@ -870,6 +1003,8 @@ function RentalSheet({ service, user, onClose, onPurchased, onNav, onBalanceUpda
   const [tariff, setTariff] = useState(service.tariffs?.[0] || null);
   const [loading, setLoading] = useState(false);
   const [result, setResult]   = useState(null);  // креды после покупки
+  const [useBonus, setUseBonus] = useState(true);
+  const bonusBal = Number(user?.bonus_balance || 0);
   const reqIdRef = useRef(null);
 
   useEffect(() => { requestAnimationFrame(() => setOpen(true)); }, []);
@@ -877,9 +1012,10 @@ function RentalSheet({ service, user, onClose, onPurchased, onNav, onBalanceUpda
 
   const buy = async () => {
     if (!tariff || loading) return;
-    const balance = Number(user?.tenge_balance || 0);
-    if (balance < tariff.price) {
-      showToast(`Нужно ${fmt(tariff.price)} ₸, у вас ${fmt(balance)} ₸`);
+    const balance   = Number(user?.tenge_balance || 0);
+    const spendable = balance + (useBonus ? bonusBal : 0);
+    if (spendable < tariff.price) {
+      showToast(`Нужно ${fmt(tariff.price)} ₸, у вас ${fmt(spendable)} ₸`);
       close();
       setTimeout(() => onNav('wallet'), 350);
       return;
@@ -891,11 +1027,11 @@ function RentalSheet({ service, user, onClose, onPurchased, onNav, onBalanceUpda
     }
     try {
       const res = await api('/api/rental/order', { method:'POST', body: JSON.stringify({
-        service_id: service.id, tariff_id: tariff.id, request_id: reqIdRef.current,
+        service_id: service.id, tariff_id: tariff.id, request_id: reqIdRef.current, use_bonus: useBonus,
       })});
       reqIdRef.current = null;
       setResult(res);
-      onBalanceUpdate && onBalanceUpdate({ tenge_balance: res.balance });
+      onBalanceUpdate && onBalanceUpdate({ tenge_balance: res.balance, bonus_balance: res.bonus_balance });
       onPurchased && onPurchased();
     } catch(e) {
       showToast(e.message);      // ключ сохраняем — ретрай дедуплицируется
@@ -955,6 +1091,12 @@ function RentalSheet({ service, user, onClose, onPurchased, onNav, onBalanceUpda
                 <div style={{fontWeight:800,fontSize:17,color: tariff?.id===t.id ? 'var(--accent-2)' : 'var(--txt)'}}>{fmt(t.price)} ₸</div>
               </button>
             ))}
+            {bonusBal > 0 && (
+              <div className="adm-row" style={{marginTop:12,marginBottom:0,justifyContent:'space-between'}}>
+                <span style={{fontSize:13}}>Списать бонусы ({fmt(bonusBal)} ₸)</span>
+                <button className={`toggle ${useBonus?'on':''}`} onClick={()=>setUseBonus(v=>!v)}/>
+              </div>
+            )}
             <button className="btn btn-primary" style={{marginTop:12,display:'flex',alignItems:'center',justifyContent:'center',gap:8}}
               onClick={buy} disabled={!tariff || loading}>
               {loading ? <><span className="spinner-sm"/> Оформляю…</> : <>Арендовать за {fmt(tariff?.price||0)} ₸</>}
@@ -1003,6 +1145,7 @@ function RentalScreen({ user, onNav, onBalanceUpdate }) {
   return (
     <div className="screen">
       <Toast msg={toast}/>
+      <button className="back-btn" onClick={() => onNav('home')}>{ICONS.back} Назад</button>
       <h2 style={{marginBottom:4}}>Аренда ИИ</h2>
       <p style={{marginBottom:16}}>Премиум-аккаунты с мгновенной выдачей</p>
 
@@ -1098,20 +1241,30 @@ function ProfileScreen({ user, orders }) {
   return (
     <div className="screen">
       <div className="card" style={{display:'flex',alignItems:'center',gap:14,marginBottom:16}}>
-        <div style={{width:52,height:52,borderRadius:'50%',background:'var(--accent)',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,fontWeight:800,flexShrink:0}}>
-          {(user?.full_name||user?.username||'U')[0].toUpperCase()}
-        </div>
+        {tg?.initDataUnsafe?.user?.photo_url ? (
+          <img src={tg.initDataUnsafe.user.photo_url} alt="" style={{width:52,height:52,borderRadius:'50%',objectFit:'cover',flexShrink:0}}/>
+        ) : (
+          <div style={{width:52,height:52,borderRadius:'50%',background:'var(--accent)',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,fontWeight:800,flexShrink:0}}>
+            {(user?.full_name||user?.username||'U')[0].toUpperCase()}
+          </div>
+        )}
         <div>
           <div style={{fontWeight:700,fontSize:16}}>{user?.full_name || 'Пользователь'}</div>
           <div style={{fontSize:13,color:'var(--txt2)'}}>@{user?.username || '—'}</div>
         </div>
       </div>
 
-      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:16}}>
+      <div style={{display:'grid',gridTemplateColumns: Number(user?.bonus_balance||0)>0 ? '1fr 1fr 1fr' : '1fr 1fr',gap:10,marginBottom:16}}>
         <div className="card" style={{textAlign:'center',padding:'14px 10px'}}>
           <div style={{fontSize:22,fontWeight:900}}>{fmt(user?.tenge_balance)} ₸</div>
           <div style={{fontSize:11,color:'var(--txt2)',marginTop:2}}>Баланс</div>
         </div>
+        {Number(user?.bonus_balance||0) > 0 && (
+          <div className="card" style={{textAlign:'center',padding:'14px 10px'}}>
+            <div style={{fontSize:22,fontWeight:900}}>{fmt(user?.bonus_balance)} ₸</div>
+            <div style={{fontSize:11,color:'var(--txt2)',marginTop:2}}>🎁 Бонусы</div>
+          </div>
+        )}
         <div className="card" style={{textAlign:'center',padding:'14px 10px'}}>
           <div style={{fontSize:22,fontWeight:900}}>{fmtT(user?.token_balance)}</div>
           <div style={{fontSize:11,color:'var(--txt2)',marginTop:2,display:'flex',alignItems:'center',justifyContent:'center',gap:5}}><Icon name="coins" size={12} color="var(--txt2)"/> Токены</div>
@@ -1151,10 +1304,14 @@ function AdminScreen({ toast }) {
   const [searchQ,    setSearchQ]    = useState('');
   const [foundUser,  setFoundUser]  = useState(null);
   const [giveAmt,    setGiveAmt]    = useState('');
+  const [giveTenge,  setGiveTenge]  = useState('');
+  const [giveBonus,  setGiveBonus]  = useState('');
   const [prices,     setPrices]     = useState({});
   const [priceSim,   setPriceSim]   = useState('');
   const [priceAi,    setPriceAi]    = useState('');
   const [priceBoth,  setPriceBoth]  = useState('');
+  const [pkgEdit,    setPkgEdit]    = useState([]); // [{tokens,tenge}] x4, для формы
+  const [savingPkg,  setSavingPkg]  = useState(null); // index сохраняемого пакета
   const [settings2,  setSettings2]  = useState({});
   const [settingEdit,setSettingEdit]= useState({});
   const [loading,    setLoading]    = useState(false);
@@ -1168,10 +1325,18 @@ function AdminScreen({ toast }) {
   const [tariffForm,  setTariffForm]  = useState({ svc:null, name:'', hours:'', price:'' });
   const [accForm,     setAccForm]     = useState({ login:'', password:'', note:'' });
   const [showPass,    setShowPass]    = useState({});      // account_id → bool
+  // Промокоды
+  const [promos,     setPromos]     = useState([]);
+  const [promoForm,  setPromoForm]  = useState({ code:'', type:'fixed', value:'', per_user_limit:1, total_limit:'', starts_at:'', ends_at:'' });
+  const [creatingPromo, setCreatingPromo] = useState(false);
+  // Рассылка
+  const [bcText,    setBcText]    = useState('');
+  const [bcSending, setBcSending] = useState(false);
 
   const loadRentSvcs   = async () => { const d = await api('/api/admin/rental/services'); setRentSvcs(d.services||[]); };
   const loadRentAccs   = async () => { const d = await api('/api/admin/rental/accounts'); setRentAccs(d.accounts||[]); };
   const loadRentOrders = async () => { const d = await api('/api/admin/rental/orders'); setRentOrders(d.rentals||[]); };
+  const loadPromos     = async () => { const d = await api('/api/admin/promo'); setPromos(d.promos||[]); };
 
   const go = async (v) => {
     setView(v); setLoading(true);
@@ -1180,11 +1345,16 @@ function AdminScreen({ toast }) {
       if (v === 'orders') { const d = await api('/api/admin/queue'); setQueue(d); }
       if (v === 'whitelist') { const d = await api('/api/admin/whitelist'); setWlUsers(d.users||[]); }
       if (v === 'banlist') { const d = await api('/api/admin/banlist'); setBanData(d); }
-      if (v === 'prices') { const d = await api('/api/prices'); setPrices(d); setPriceSim(d.price_sim||''); setPriceAi(d.price_ai||''); setPriceBoth(d.price_both||''); }
+      if (v === 'prices') {
+        const d = await api('/api/prices'); setPrices(d);
+        setPriceSim(d.price_sim||''); setPriceAi(d.price_ai||''); setPriceBoth(d.price_both||'');
+        const p = await api('/api/packages'); setPkgEdit((p.packages||[]).map(x=>({tokens:x.tokens,tenge:x.tenge})));
+      }
       if (v === 'settings') { const d = await api('/api/admin/settings'); setSettings2(d); setSettingEdit({...d}); }
       if (v === 'rental_services') { await loadRentSvcs(); }
       if (v === 'rental_accounts') { await Promise.all([loadRentSvcs(), loadRentAccs()]); }
       if (v === 'rental_orders')   { await loadRentOrders(); }
+      if (v === 'promo')   { await loadPromos(); }
     } catch(e) { toast('Ошибка: '+e.message); } finally { setLoading(false); }
   };
 
@@ -1203,6 +1373,8 @@ function AdminScreen({ toast }) {
     { v:'user',      icon:'search', label:'Найти юзера', sub:'ID или @username' },
     { v:'receipt',   icon:'search', label:'Поиск по чеку', sub:'QR-номер Kaspi' },
     { v:'prices',    icon:'money',  label:'Цены',        sub:'Turnitin' },
+    { v:'promo',     icon:'gift',   label:'Промокоды',   sub:'Создать / список' },
+    { v:'broadcast', icon:'bell',   label:'Рассылка',    sub:'Всем пользователям' },
     { v:'settings',  icon:'gear',   label:'Настройки',   sub:'Реквизиты и проч.' },
     { v:'cleanup',   icon:'clean',  label:'Очистка',     sub:'Кэш браузера' },
   ];
@@ -1368,11 +1540,19 @@ function AdminScreen({ toast }) {
       try { const d = await api(`/api/admin/user?q=${encodeURIComponent(searchQ.trim())}`); setFoundUser(d); }
       catch(e) { toast(e.message); setFoundUser(null); } finally { setLoading(false); }
     };
-    const giveTokens = async () => {
-      const amt = parseFloat(giveAmt);
+    const adjustBalance = async (currency, direction) => {
+      const inputs = { tenge: giveTenge, token: giveAmt, bonus: giveBonus };
+      const amt = parseFloat(inputs[currency]);
       if (!amt || !foundUser) return;
-      try { const d = await api('/api/admin/give_tokens', { method:'POST', body:JSON.stringify({ tg_id:foundUser.tg_id, amount:amt }) }); toast(`+${amt} токенов → ${d.new_balance.toFixed(1)}`); setFoundUser(u=>({...u,token_balance:d.new_balance})); setGiveAmt(''); }
-      catch(e) { toast('Ошибка: '+e.message); }
+      try {
+        const d = await api('/api/admin/adjust_balance', { method:'POST', body:JSON.stringify({ tg_id:foundUser.tg_id, currency, direction, amount:amt }) });
+        const sign = direction === 'add' ? '+' : '-';
+        const label = { tenge:'₸', token:'токенов', bonus:'₸ бонусов' }[currency];
+        toast(`${sign}${amt} ${label} → ${d.new_balance.toFixed(currency==='token'?1:0)}`);
+        if (currency === 'tenge') { setFoundUser(u=>({...u,tenge_balance:d.new_balance})); setGiveTenge(''); }
+        else if (currency === 'bonus') { setFoundUser(u=>({...u,bonus_balance:d.new_balance})); setGiveBonus(''); }
+        else { setFoundUser(u=>({...u,token_balance:d.new_balance})); setGiveAmt(''); }
+      } catch(e) { toast('Ошибка: '+e.message); }
     };
     const toggleWl = async () => {
       if (!foundUser) return;
@@ -1394,10 +1574,14 @@ function AdminScreen({ toast }) {
           <div className="card">
             <div style={{fontWeight:700,fontSize:16,marginBottom:4}}>{foundUser.full_name||'—'}</div>
             <div style={{fontSize:13,color:'var(--txt2)',marginBottom:10}}>@{foundUser.username||'—'} · {foundUser.tg_id}</div>
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:12}}>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:12}}>
               <div style={{background:'var(--bg)',borderRadius:8,padding:'8px 10px',textAlign:'center'}}>
                 <div style={{fontWeight:800}}>{fmt(foundUser.tenge_balance||0)} ₸</div>
                 <div style={{fontSize:11,color:'var(--txt2)'}}>Баланс ₸</div>
+              </div>
+              <div style={{background:'var(--bg)',borderRadius:8,padding:'8px 10px',textAlign:'center'}}>
+                <div style={{fontWeight:800}}>{fmt(foundUser.bonus_balance||0)} ₸</div>
+                <div style={{fontSize:11,color:'var(--txt2)'}}>🎁 Бонусы</div>
               </div>
               <div style={{background:'var(--bg)',borderRadius:8,padding:'8px 10px',textAlign:'center'}}>
                 <div style={{fontWeight:800}}>{fmtT(foundUser.token_balance||0)}</div>
@@ -1414,8 +1598,19 @@ function AdminScreen({ toast }) {
               }
             </div>
             <div className="adm-row">
+              <input className="adm-input" type="number" placeholder="Баланс ₸" value={giveTenge} onChange={e=>setGiveTenge(e.target.value)}/>
+              <button className="btn-sm btn-sm-green" onClick={()=>adjustBalance('tenge','add')}>+</button>
+              <button className="btn-sm btn-sm-red" onClick={()=>adjustBalance('tenge','deduct')}>−</button>
+            </div>
+            <div className="adm-row">
+              <input className="adm-input" type="number" placeholder="Бонусы ₸" value={giveBonus} onChange={e=>setGiveBonus(e.target.value)}/>
+              <button className="btn-sm btn-sm-green" onClick={()=>adjustBalance('bonus','add')}>+</button>
+              <button className="btn-sm btn-sm-red" onClick={()=>adjustBalance('bonus','deduct')}>−</button>
+            </div>
+            <div className="adm-row">
               <input className="adm-input" type="number" placeholder="Токены" value={giveAmt} onChange={e=>setGiveAmt(e.target.value)}/>
-              <button className="btn-sm btn-sm-blue" onClick={giveTokens}>Начислить</button>
+              <button className="btn-sm btn-sm-green" onClick={()=>adjustBalance('token','add')}>+</button>
+              <button className="btn-sm btn-sm-red" onClick={()=>adjustBalance('token','deduct')}>−</button>
             </div>
           </div>
         )}
@@ -1503,6 +1698,17 @@ function AdminScreen({ toast }) {
         toast('Цены обновлены');
       } catch(e) { toast(e.message); }
     };
+    const setPkgField = (i, field, val) => setPkgEdit(arr => arr.map((p,idx) => idx===i ? {...p,[field]:val} : p));
+    const savePkg = async (i) => {
+      const pkg = pkgEdit[i];
+      const tokens = parseInt(pkg.tokens), tenge = parseInt(pkg.tenge);
+      if (!tokens || !tenge) { toast('Токены и цена должны быть > 0'); return; }
+      setSavingPkg(i);
+      try {
+        await api('/api/admin/packages', { method:'POST', body:JSON.stringify({ index:i+1, tokens, tenge }) });
+        toast(`Пакет ${i+1} обновлён`);
+      } catch(e) { toast('Ошибка: '+e.message); } finally { setSavingPkg(null); }
+    };
     return (
       <div className="screen">
         <Back/><h2 style={{marginBottom:14}}>Цены Turnitin</h2>
@@ -1514,6 +1720,131 @@ function AdminScreen({ toast }) {
           </div>
         ))}
         <button className="btn btn-primary" style={{marginTop:8}} onClick={save}>Сохранить</button>
+
+        <div className="sec-title" style={{marginTop:22}}>Пакеты токенов Хуманайзера</div>
+        {pkgEdit.map((pkg, i) => (
+          <div key={i} className="adm-row" style={{marginBottom:8}}>
+            <input className="adm-input" type="number" placeholder="токенов" value={pkg.tokens} onChange={e=>setPkgField(i,'tokens',e.target.value)}/>
+            <input className="adm-input" type="number" placeholder="₸" value={pkg.tenge} onChange={e=>setPkgField(i,'tenge',e.target.value)}/>
+            <button className="btn-sm btn-sm-blue" onClick={()=>savePkg(i)} disabled={savingPkg===i}>{savingPkg===i?'...':'Сохранить'}</button>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (view === 'promo') {
+    const PROMO_STATUS = { active:['Активен','tag-green'], expired:['Истёк','tag-gray'], exhausted:['Исчерпан','tag-red'], scheduled:['Запланирован','tag-yellow'] };
+    const localToUTC = (v) => {
+      // datetime-local — трактуем как Asia/Almaty (UTC+5), как и Kaspi-чеки.
+      if (!v) return null;
+      const d = new Date(v + ':00+05:00');
+      return isNaN(d) ? null : d.toISOString().split('.')[0];
+    };
+    const createPromo = async () => {
+      const code = promoForm.code.trim();
+      const value = parseFloat(promoForm.value);
+      if (!code || !value || value <= 0) { toast('Заполни код и размер бонуса'); return; }
+      setCreatingPromo(true);
+      try {
+        await api('/api/admin/promo', { method:'POST', body: JSON.stringify({
+          code, type: promoForm.type, value,
+          per_user_limit: parseInt(promoForm.per_user_limit) || 1,
+          total_limit: promoForm.total_limit ? parseInt(promoForm.total_limit) : null,
+          starts_at: localToUTC(promoForm.starts_at),
+          ends_at: localToUTC(promoForm.ends_at),
+        })});
+        toast('Промокод создан');
+        setPromoForm({ code:'', type:'fixed', value:'', per_user_limit:1, total_limit:'', starts_at:'', ends_at:'' });
+        await loadPromos();
+      } catch(e) { toast('Ошибка: '+e.message); } finally { setCreatingPromo(false); }
+    };
+    const removePromo = async (id) => {
+      if (!window.confirm('Удалить промокод? Действие необратимо.')) return;
+      try { await api('/api/admin/promo/delete', { method:'POST', body: JSON.stringify({ id }) }); toast('Удалён'); await loadPromos(); }
+      catch(e) { toast('Ошибка: '+e.message); }
+    };
+    return (
+      <div className="screen">
+        <Back/><h2 style={{marginBottom:14}}>Промокоды</h2>
+
+        <div className="card" style={{marginBottom:16}}>
+          <input className="adm-input" placeholder="КОД (напр. SUMMER2026)" style={{marginBottom:8,width:'100%',textTransform:'uppercase'}}
+            value={promoForm.code} onChange={e=>setPromoForm(f=>({...f,code:e.target.value.toUpperCase()}))}/>
+          <div style={{display:'flex',gap:8,marginBottom:8}}>
+            <select className="adm-input" style={{flex:1}} value={promoForm.type} onChange={e=>setPromoForm(f=>({...f,type:e.target.value}))}>
+              <option value="fixed">Фиксированный (₸)</option>
+              <option value="percent">Процентный (%)</option>
+            </select>
+            <input className="adm-input" type="number" placeholder={promoForm.type==='fixed'?'₸':'%'} style={{width:100}}
+              value={promoForm.value} onChange={e=>setPromoForm(f=>({...f,value:e.target.value}))}/>
+          </div>
+          <div style={{display:'flex',gap:8,marginBottom:8}}>
+            <div style={{flex:1}}>
+              <div style={{fontSize:11,color:'var(--txt2)',marginBottom:4}}>Лимит на юзера</div>
+              <input className="adm-input" type="number" style={{width:'100%'}} value={promoForm.per_user_limit} onChange={e=>setPromoForm(f=>({...f,per_user_limit:e.target.value}))}/>
+            </div>
+            <div style={{flex:1}}>
+              <div style={{fontSize:11,color:'var(--txt2)',marginBottom:4}}>Общий лимит (пусто = без лимита)</div>
+              <input className="adm-input" type="number" style={{width:'100%'}} value={promoForm.total_limit} onChange={e=>setPromoForm(f=>({...f,total_limit:e.target.value}))}/>
+            </div>
+          </div>
+          <div style={{display:'flex',gap:8,marginBottom:12}}>
+            <div style={{flex:1}}>
+              <div style={{fontSize:11,color:'var(--txt2)',marginBottom:4}}>Начало действия</div>
+              <input className="adm-input" type="datetime-local" style={{width:'100%'}} value={promoForm.starts_at} onChange={e=>setPromoForm(f=>({...f,starts_at:e.target.value}))}/>
+            </div>
+            <div style={{flex:1}}>
+              <div style={{fontSize:11,color:'var(--txt2)',marginBottom:4}}>Окончание</div>
+              <input className="adm-input" type="datetime-local" style={{width:'100%'}} value={promoForm.ends_at} onChange={e=>setPromoForm(f=>({...f,ends_at:e.target.value}))}/>
+            </div>
+          </div>
+          <button className="btn btn-primary" onClick={createPromo} disabled={creatingPromo}>{creatingPromo?'...':'Создать промокод'}</button>
+        </div>
+
+        <div className="sec-title">Список ({promos.length})</div>
+        {loading ? <Spinner/> : promos.length === 0 ? <p className="empty">Промокодов пока нет</p> : promos.map(p => {
+          const [label, cls] = PROMO_STATUS[p.status] || [p.status,'tag-gray'];
+          return (
+            <div key={p.id} className="order-row">
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700}}>{p.code} · {p.type==='fixed' ? `${fmt(p.value)} ₸` : `${p.value}%`}</div>
+                <div className="order-meta"><span className={`tag ${cls}`}>{label}</span> · {p.activations_count}/{p.total_limit ?? '∞'} активаций · лимит/юзер {p.per_user_limit}</div>
+              </div>
+              <button className="btn-sm btn-sm-red" onClick={()=>removePromo(p.id)}>Удалить</button>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  if (view === 'broadcast') {
+    const send = async () => {
+      const text = bcText.trim();
+      if (!text) { toast('Введите текст рассылки'); return; }
+      if (!window.confirm(`Отправить это сообщение ВСЕМ пользователям бота? Действие нельзя отменить.`)) return;
+      setBcSending(true);
+      try {
+        const res = await api('/api/admin/broadcast', { method:'POST', body: JSON.stringify({ text }) });
+        toast(`Рассылка запущена: ${res.total} получателей`);
+        setBcText('');
+      } catch(e) { toast('Ошибка: '+e.message); } finally { setBcSending(false); }
+    };
+    return (
+      <div className="screen">
+        <Back/><h2 style={{marginBottom:6}}>Рассылка</h2>
+        <p style={{marginBottom:14,color:'var(--txt2)',fontSize:13}}>Сообщение уйдёт всем не забаненным пользователям бота. Поддерживается HTML-разметка Telegram.</p>
+        <textarea
+          className="textarea"
+          value={bcText}
+          onChange={e=>setBcText(e.target.value)}
+          placeholder="Текст сообщения..."
+          rows={8}
+          style={{marginBottom:8}}
+        />
+        <div style={{fontSize:11,color:'var(--txt2)',marginBottom:16,textAlign:'right'}}>{bcText.length} символов</div>
+        <button className="btn btn-primary" onClick={send} disabled={bcSending || !bcText.trim()}>{bcSending?'Отправка...':'Отправить всем'}</button>
       </div>
     );
   }
@@ -1590,6 +1921,16 @@ function AdminScreen({ toast }) {
         await loadRentSvcs();
       } catch(e) { toast('Ошибка: '+e.message); }
     };
+    const deleteSvc = async (s) => {
+      if (!window.confirm(`Удалить сервис «${s.name}» из каталога?`)) return;
+      try { await api('/api/admin/rental/service/delete', { method:'POST', body: JSON.stringify({ id:s.id }) }); toast('Удалён'); await loadRentSvcs(); }
+      catch(e) { toast('Ошибка: '+e.message); }
+    };
+    const deleteTariff = async (t) => {
+      if (!window.confirm(`Удалить тариф «${t.name}»?`)) return;
+      try { await api('/api/admin/rental/tariff/delete', { method:'POST', body: JSON.stringify({ id:t.id }) }); toast('Удалён'); await loadRentSvcs(); }
+      catch(e) { toast('Ошибка: '+e.message); }
+    };
     return (
       <div className="screen">
         <Back/><h2 style={{marginBottom:14}}>Аренда: каталог</h2>
@@ -1611,6 +1952,7 @@ function AdminScreen({ toast }) {
                 <div style={{fontSize:11,color:'var(--txt2)'}}>свободно {s.cnt_free} · аренда {s.cnt_rented} · ремонт {s.cnt_maintenance}{s.waiting?` · ждут ${s.waiting}`:''}</div>
               </div>
               <button className={`btn-sm ${s.is_active?'btn-sm-gray':'btn-sm-green'}`} onClick={()=>toggleSvc(s)}>{s.is_active?'Скрыть':'Вкл'}</button>
+              <button className="btn-sm btn-sm-red" onClick={()=>deleteSvc(s)}>Удалить</button>
             </div>
             {(s.tariffs||[]).map(t => (
               <div key={t.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'7px 0',borderTop:'1px solid var(--card-b)',fontSize:13,opacity:t.is_active?1:.5}}>
@@ -1618,6 +1960,7 @@ function AdminScreen({ toast }) {
                 <span style={{display:'flex',alignItems:'center',gap:8}}>
                   <b>{fmt(t.price)} ₸</b>
                   <button className="btn-sm btn-sm-gray" style={{padding:'4px 8px',fontSize:11}} onClick={()=>toggleTariff(t)}>{t.is_active?'Выкл':'Вкл'}</button>
+                  <button className="btn-sm btn-sm-red" style={{padding:'4px 8px',fontSize:11}} onClick={()=>deleteTariff(t)}>{React.cloneElement(ICONS.trash,{width:13,height:13})}</button>
                 </span>
               </div>
             ))}

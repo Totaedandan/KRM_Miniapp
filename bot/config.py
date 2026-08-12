@@ -26,27 +26,17 @@ class Settings(BaseSettings):
     KASPI_RECIPIENT_NAME: str = ""
     KASPI_EXPIRE_MINUTES: int = 60     # срок действия чека
 
+    # ── ApiPay (автоматическое пополнение баланса через Kaspi) ───
+    APIPAY_API_KEY: str = ""
+    APIPAY_WEBHOOK_SECRET: str = ""
+
     # ── Цены Turnitin (тенге) — переопределяются из БД settings ─
     DEFAULT_PRICE_SIM: int = 700       # только плагиат
     DEFAULT_PRICE_AI: int = 700        # только AI-детекция
     DEFAULT_PRICE_BOTH: int = 1200     # оба отчёта
 
-    # ── Пакеты токенов для Хуманайзера ───────────────────────────
-    PACKAGE_1_TOKENS: int = 100
-    PACKAGE_1_STARS: int = 100
-    PACKAGE_1_TENGE: int = 1000
-
-    PACKAGE_2_TOKENS: int = 250
-    PACKAGE_2_STARS: int = 230
-    PACKAGE_2_TENGE: int = 2300
-
-    PACKAGE_3_TOKENS: int = 600
-    PACKAGE_3_STARS: int = 520
-    PACKAGE_3_TENGE: int = 5200
-
-    PACKAGE_4_TOKENS: int = 1200
-    PACKAGE_4_STARS: int = 950
-    PACKAGE_4_TENGE: int = 9500
+    # Пакеты токенов Хуманайзера теперь хранятся и редактируются через
+    # database.get_token_packages()/set_token_package() (таблица settings).
 
     # Стоимость хуманайзера: 0.5 токена/слово (бизнес × 10)
     HUMANIZER_COST_PER_WORD: float = 0.5
@@ -77,14 +67,6 @@ class Settings(BaseSettings):
     def is_admin(self, tg_id: int) -> bool:
         """True для админов из ADMIN_IDS и суперадмина — проходят флоу бесплатно."""
         return tg_id in self.admin_id_list
-
-    def get_humanizer_packages(self) -> list[dict]:
-        return [
-            {"tokens": self.PACKAGE_1_TOKENS, "stars": self.PACKAGE_1_STARS, "tenge": self.PACKAGE_1_TENGE},
-            {"tokens": self.PACKAGE_2_TOKENS, "stars": self.PACKAGE_2_STARS, "tenge": self.PACKAGE_2_TENGE},
-            {"tokens": self.PACKAGE_3_TOKENS, "stars": self.PACKAGE_3_STARS, "tenge": self.PACKAGE_3_TENGE},
-            {"tokens": self.PACKAGE_4_TOKENS, "stars": self.PACKAGE_4_STARS, "tenge": self.PACKAGE_4_TENGE},
-        ]
 
     class Config:
         env_file = ".env"

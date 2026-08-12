@@ -8,12 +8,16 @@ FastAPI — бэкенд для Telegram Mini App.
   GET  /api/orders           — история заказов пользователя
   GET  /api/packages         — пакеты токенов
   POST /api/humanize         — хуманизировать текст (списывает токены)
+  POST /api/promo/apply      — активировать промокод (fixed — сразу, percent — превью)
+  POST /api/topup            — создать счёт ApiPay на пополнение баланса (Kaspi)
+  GET  /api/topup/status     — статус пополнения (для поллинга из Mini App)
+  POST /api/kaspi/webhook    — вебхук ApiPay (без initData, авторизация по подписи)
 
 Админские эндпоинты (только superadmin):
   GET  /api/admin/stats
   GET  /api/admin/orders
   GET  /api/admin/user?q=
-  POST /api/admin/give_tokens
+  POST /api/admin/adjust_balance
   GET  /api/admin/whitelist
   POST /api/admin/whitelist/add
   POST /api/admin/whitelist/remove
@@ -21,21 +25,30 @@ FastAPI — бэкенд для Telegram Mini App.
   POST /api/admin/ban
   POST /api/admin/unban
   POST /api/admin/prices
+  POST /api/admin/packages
   GET  /api/admin/settings
   POST /api/admin/settings
   POST /api/admin/cleanup
+  GET  /api/admin/promo
+  POST /api/admin/promo
+  POST /api/admin/promo/delete
+  POST /api/admin/broadcast
+  POST /api/admin/rental/service/delete
+  POST /api/admin/rental/tariff/delete
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from urllib.parse import unquote
 
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -128,13 +141,14 @@ async def serve_mini_app():
 async def get_me(x_telegram_init_data: str = Header(None)):
     user     = await _get_user(x_telegram_init_data)
     prices   = await database.get_prices()
-    packages = settings.get_humanizer_packages()
+    packages = await database.get_token_packages()
     return {
         "tg_id":           user["tg_id"],
         "username":        user.get("username"),
         "full_name":       user.get("full_name"),
         "tenge_balance":   round(user.get("tenge_balance", 0.0), 2),
         "token_balance":   round(user.get("token_balance", 0.0), 2),
+        "bonus_balance":   round(user.get("bonus_balance", 0.0), 2),
         "is_whitelisted":  bool(user.get("is_whitelisted")),
         "is_admin":        settings.is_admin(user["tg_id"]),
         "prices":          prices,
@@ -157,7 +171,7 @@ async def get_prices():
 
 @app.get("/api/packages")
 async def get_packages():
-    return {"packages": settings.get_humanizer_packages()}
+    return {"packages": await database.get_token_packages()}
 
 
 # ── Извлечение текста из docx (для Хуманайзера в Mini App) ───────────────────
@@ -280,18 +294,33 @@ async def admin_find_user(q: str, x_telegram_init_data: str = Header(None)):
     return user
 
 
-class GiveTokensBody(BaseModel):
-    tg_id:  int
-    amount: float
+class AdjustBalanceBody(BaseModel):
+    tg_id:     int
+    currency:  str    # 'tenge' | 'token' | 'bonus'
+    direction: str    # 'add' | 'deduct'
+    amount:    float
 
 
-@app.post("/api/admin/give_tokens")
-async def admin_give_tokens(body: GiveTokensBody, x_telegram_init_data: str = Header(None)):
+@app.post("/api/admin/adjust_balance")
+async def admin_adjust_balance(body: AdjustBalanceBody, x_telegram_init_data: str = Header(None)):
     await _get_admin(x_telegram_init_data)
     if body.amount <= 0:
         raise HTTPException(400, "Сумма должна быть > 0")
-    new_balance = await database.add_tokens(body.tg_id, body.amount, reason="admin_adjust")
-    return {"new_balance": round(new_balance, 2)}
+    if body.currency not in ("tenge", "token", "bonus"):
+        raise HTTPException(400, "currency: tenge | token | bonus")
+    if body.direction not in ("add", "deduct"):
+        raise HTTPException(400, "direction: add | deduct")
+
+    fn = {
+        ("tenge", "add"):    database.add_tenge,
+        ("tenge", "deduct"): database.deduct_tenge,
+        ("token", "add"):    database.add_tokens,
+        ("token", "deduct"): database.deduct_tokens,
+        ("bonus", "add"):    database.add_bonus,
+        ("bonus", "deduct"): database.deduct_bonus,
+    }[(body.currency, body.direction)]
+    new_balance = await fn(body.tg_id, body.amount, reason="admin_adjust")
+    return {"currency": body.currency, "new_balance": round(new_balance, 2)}
 
 
 # -- Whitelist ----------------------------------------------------------------
@@ -387,6 +416,24 @@ async def admin_set_prices(body: PricesBody, x_telegram_init_data: str = Header(
     return await database.get_prices()
 
 
+class PackagePriceBody(BaseModel):
+    index:  int    # 1-4
+    tokens: int
+    tenge:  int
+
+
+@app.post("/api/admin/packages")
+async def admin_set_package(body: PackagePriceBody, x_telegram_init_data: str = Header(None)):
+    await _get_admin(x_telegram_init_data)
+    if body.tokens <= 0 or body.tenge <= 0:
+        raise HTTPException(400, "Токены и цена должны быть > 0")
+    try:
+        await database.set_token_package(body.index, body.tokens, body.tenge)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"packages": await database.get_token_packages()}
+
+
 # -- Settings -----------------------------------------------------------------
 
 EDITABLE_SETTINGS = {
@@ -429,11 +476,13 @@ class OrderBody(BaseModel):
     report_type: str = "both"
     is_premium:  bool = False
     request_id:  Optional[str] = None   # ключ идемпотентности (от Mini App)
+    use_bonus:   bool = False           # списывать ли сначала с бонусного баланса
 
 
 @app.post("/api/order")
 async def create_order(body: OrderBody, x_telegram_init_data: str = Header(None)):
-    """Создать заказ Turnitin — списать тенге, забронировать место в очереди."""
+    """Создать заказ Turnitin — списать тенге (+бонус, если включено), забронировать
+    место в очереди."""
     from services.queue_manager import turnitin_queue
     user = await _get_user(x_telegram_init_data)
     tg_id = user["tg_id"]
@@ -461,8 +510,9 @@ async def create_order(body: OrderBody, x_telegram_init_data: str = Header(None)
             status="queued",
         )
         new_balance = await database.get_tenge_balance(tg_id)
+        new_bonus = user.get("bonus_balance", 0.0)
     else:
-        # Платно: атомарно списать + создать заказ + записать в ledger.
+        # Платно: атомарно списать (бонус сначала, если use_bonus) + создать заказ + ledger.
         # request_id из Mini App защищает от двойного списания (двойной тап/ретрай).
         idem = f"order:{tg_id}:{body.request_id}" if body.request_id else None
         try:
@@ -473,13 +523,17 @@ async def create_order(body: OrderBody, x_telegram_init_data: str = Header(None)
                 price=price,
                 is_premium=body.is_premium,
                 idempotency_key=idem,
+                use_bonus=body.use_bonus,
             )
         except database.InsufficientFunds:
             balance = await database.get_tenge_balance(tg_id)
-            raise HTTPException(402, f"Недостаточно средств. Нужно {price} ₸, есть {balance:.0f} ₸")
+            bonus = await database.get_bonus_balance(tg_id) if body.use_bonus else 0
+            have = f"{balance:.0f} ₸" + (f" + {bonus:.0f} ₸ бонусов" if bonus else "")
+            raise HTTPException(402, f"Недостаточно средств. Нужно {price} ₸, есть {have}")
 
         order_id = res["order_id"]
         new_balance = res["balance"]
+        new_bonus = res.get("bonus_balance", 0.0)
         if res.get("duplicate"):
             # Повторный запрос — заказ уже создан, второй раз не списываем и не дёргаем очередь
             return {
@@ -488,6 +542,7 @@ async def create_order(body: OrderBody, x_telegram_init_data: str = Header(None)
                 "is_premium": body.is_premium,
                 "price": price,
                 "balance": round(new_balance, 2),
+                "bonus_balance": round(new_bonus, 2),
                 "duplicate": True,
             }
 
@@ -500,61 +555,155 @@ async def create_order(body: OrderBody, x_telegram_init_data: str = Header(None)
         "is_premium": body.is_premium,
         "price": price,
         "balance": round(new_balance, 2),
+        "bonus_balance": round(new_bonus, 2),
     }
 
 
 class TopupBody(BaseModel):
     amount: float
+    phone_number: str
+    promo_code: Optional[str] = None
+
+
+_PHONE_RE = re.compile(r"^87\d{9}$")
 
 
 @app.post("/api/topup")
 async def init_topup(body: TopupBody, x_telegram_init_data: str = Header(None)):
-    """Инициализировать пополнение тенге через Kaspi."""
+    """Инициализировать автоматическое пополнение тенге через ApiPay (Kaspi)."""
     user = await _get_user(x_telegram_init_data)
     tg_id = user["tg_id"]
 
     if body.amount < 100:
         raise HTTPException(400, "Минимальная сумма пополнения — 100 ₸")
+    phone = body.phone_number.strip()
+    if not _PHONE_RE.match(phone):
+        raise HTTPException(400, "Номер телефона в формате 87001234567")
+
+    # Процентный промокод — лёгкая пре-проверка (fail-fast). Если код невалиден
+    # к этому моменту — просто не прикрепляем его, пополнение не блокируем.
+    promo_code = None
+    if body.promo_code:
+        try:
+            await database.validate_promo_for_topup(tg_id, body.promo_code)
+            promo_code = database._normalize_promo_code(body.promo_code)
+        except Exception as e:
+            logger.info(f"topup promo pre-check failed for {tg_id}: {e}")
 
     payment_id = await database.create_payment(
         user_id=tg_id,
-        payment_type="kaspi",
+        payment_type="apipay",
         purpose="topup_tenge",
         amount_tenge=body.amount,
-    )
-    await database.set_pending_action(
-        tg_id, "waiting_topup_pdf",
-        {"payment_id": payment_id, "amount": body.amount},
+        promo_code=promo_code,
     )
 
-    phone = await database.get_setting("kaspi_phone") or settings.KASPI_PHONE
-    name  = await database.get_setting("kaspi_recipient_name") or settings.KASPI_RECIPIENT_NAME
-
-    await _bot_send(tg_id,
-        f"💳 <b>Пополнение баланса — {body.amount:.0f} ₸</b>\n\n"
-        f"Получатель: <b>{name}</b>\n"
-        f"Телефон: <b>{phone}</b>\n"
-        f"Сумма: <b>{body.amount:.0f} ₸</b>\n\n"
-        f"Переведите <b>точную сумму</b> и отправьте PDF-чек из Kaspi в <b>этот чат</b>."
-    )
+    from services import apipay_service
+    try:
+        await apipay_service.create_invoice(
+            amount=int(body.amount),
+            phone_number=phone,
+            description=f"Пополнение баланса #{payment_id}",
+            external_order_id=str(payment_id),
+        )
+    except apipay_service.ApiPayValidationError as e:
+        raise HTTPException(400, str(e))
+    except apipay_service.ApiPayError:
+        raise HTTPException(502, "Платёжный сервис недоступен, попробуйте позже")
 
     return {
         "ok": True,
         "payment_id": payment_id,
-        "kaspi_phone": phone,
-        "kaspi_name": name,
         "amount": body.amount,
+        "phone_number": phone,
     }
+
+
+@app.get("/api/topup/status")
+async def topup_status(payment_id: int, x_telegram_init_data: str = Header(None)):
+    user = await _get_user(x_telegram_init_data)
+    payment = await database.get_payment(payment_id)
+    if not payment or payment["user_id"] != user["tg_id"]:
+        raise HTTPException(404, "Платёж не найден")
+    result = {"status": payment["status"]}
+    if payment["status"] == "confirmed":
+        result["tenge_balance"] = round(await database.get_tenge_balance(user["tg_id"]), 2)
+    return result
+
+
+@app.post("/api/kaspi/webhook")
+async def kaspi_webhook(request: Request, x_webhook_signature: str = Header(None)):
+    """Вебхук ApiPay о смене статуса счёта. Аутентификация — по подписи, не по initData."""
+    from services import apipay_service
+
+    raw = await request.body()
+    logger.info(f"kaspi_webhook received: has_sig={bool(x_webhook_signature)} len={len(raw)} body={raw[:500]}")
+    if not apipay_service.verify_webhook_signature(raw, x_webhook_signature):
+        logger.warning(f"kaspi_webhook: signature mismatch, got={x_webhook_signature}")
+        raise HTTPException(401, "Invalid signature")
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"ok": True}
+
+    if payload.get("event") != "invoice.status_changed":
+        return {"ok": True}
+
+    invoice = payload.get("invoice") or {}
+    status = invoice.get("status")
+    invoice_id = invoice.get("id")
+    external_order_id = invoice.get("external_order_id")
+
+    try:
+        payment_id = int(external_order_id)
+    except (TypeError, ValueError):
+        logger.warning(f"kaspi_webhook: bad external_order_id={external_order_id!r}")
+        return {"ok": True}
+
+    payment = await database.get_payment(payment_id)
+    if not payment or payment["status"] == "confirmed":
+        return {"ok": True}
+
+    if status == "paid":
+        amount = float(payment["amount_tenge"] or 0)
+        new_balance = await database.add_tenge(
+            payment["user_id"], amount, reason="topup",
+            idempotency_key=f"apipay:{invoice_id}",
+        )
+        bonus_line = ""
+        if payment.get("promo_code"):
+            promo_result = await database.redeem_promo_percent(
+                payment["user_id"], payment["promo_code"], base_amount=amount,
+            )
+            if promo_result.get("applied"):
+                bonus_line = (f"\n🎁 Бонус по промокоду <b>{payment['promo_code']}</b>: "
+                              f"+{promo_result['bonus']:.0f} ₸ (бонусный баланс)")
+        await database.confirm_payment(payment_id, charge_id=str(invoice_id))
+        await _bot_send(
+            payment["user_id"],
+            f"✅ <b>Баланс пополнен!</b>\n\n"
+            f"💰 Зачислено: <b>{amount:.0f} ₸</b>{bonus_line}\n"
+            f"💰 Новый баланс: <b>{new_balance:.0f} ₸</b>",
+        )
+    elif status in ("cancelled", "expired", "error"):
+        await database.fail_payment(payment_id, status)
+        reason = {"cancelled": "отменена", "expired": "истёк срок ожидания", "error": "техническая ошибка"}.get(status, status)
+        await _bot_send(payment["user_id"], f"❌ Пополнение баланса не удалось: {reason}.")
+    # status == "pending" — счёт создан, ждём подтверждения в Kaspi, ничего не делаем
+
+    return {"ok": True}
 
 
 class BuyTokensApiBody(BaseModel):
     tokens: float
     tenge: float
+    use_bonus: bool = False   # списывать ли сначала с бонусного баланса
 
 
 @app.post("/api/buy_tokens")
 async def buy_tokens_api(body: BuyTokensApiBody, x_telegram_init_data: str = Header(None)):
-    """Купить токены из тенге-баланса мгновенно."""
+    """Купить токены из тенге-баланса (+бонус, если включено) мгновенно."""
     user = await _get_user(x_telegram_init_data)
     tg_id = user["tg_id"]
 
@@ -562,11 +711,18 @@ async def buy_tokens_api(body: BuyTokensApiBody, x_telegram_init_data: str = Hea
         raise HTTPException(400, "Неверные данные пакета")
 
     is_wl = bool(user.get("is_whitelisted"))
+    new_bonus = user.get("bonus_balance", 0.0)
     if not is_wl:
-        balance = await database.get_tenge_balance(tg_id)
-        if balance < body.tenge:
-            raise HTTPException(402, f"Недостаточно средств. Нужно {body.tenge:.0f} ₸, есть {balance:.0f} ₸")
-        await database.deduct_tenge(tg_id, body.tenge, reason="token_purchase")
+        try:
+            debit = await database.debit_with_bonus(
+                tg_id, body.tenge, body.use_bonus, reason="token_purchase",
+            )
+        except database.InsufficientFunds:
+            balance = await database.get_tenge_balance(tg_id)
+            bonus = await database.get_bonus_balance(tg_id) if body.use_bonus else 0
+            have = f"{balance:.0f} ₸" + (f" + {bonus:.0f} ₸ бонусов" if bonus else "")
+            raise HTTPException(402, f"Недостаточно средств. Нужно {body.tenge:.0f} ₸, есть {have}")
+        new_bonus = debit["bonus_balance"]
 
     new_tokens = await database.add_tokens(tg_id, body.tokens, reason="token_purchase")
     new_tenge  = await database.get_tenge_balance(tg_id)
@@ -583,7 +739,49 @@ async def buy_tokens_api(body: BuyTokensApiBody, x_telegram_init_data: str = Hea
         "ok": True,
         "new_token_balance": round(new_tokens, 2),
         "new_tenge_balance": round(new_tenge, 2),
+        "new_bonus_balance": round(new_bonus, 2),
     }
+
+
+# ── Промокоды ──────────────────────────────────────────────────────────────
+# fixed — редимится мгновенно здесь. percent — только проверяется здесь
+# (превью), реально консьюмится позже в payment.py при подтверждении Kaspi-чека.
+
+class PromoApplyBody(BaseModel):
+    code: str
+
+
+_PROMO_EXC_STATUS = {
+    database.PromoNotFound:    404,
+    database.PromoNotActive:   400,
+    database.PromoExhausted:   400,
+    database.PromoAlreadyUsed: 400,
+}
+
+
+@app.post("/api/promo/apply")
+async def promo_apply(body: PromoApplyBody, x_telegram_init_data: str = Header(None)):
+    user = await _get_user(x_telegram_init_data)
+    tg_id = user["tg_id"]
+    code = (body.code or "").strip()
+    if not code:
+        raise HTTPException(400, "Введите промокод")
+
+    try:
+        preview = await database.validate_promo_for_topup(tg_id, code)
+        return {"type": "percent", "percent": preview["value"], "code": preview["code"]}
+    except ValueError:
+        pass  # не percent-код — пробуем как fixed ниже
+    except tuple(_PROMO_EXC_STATUS) as e:
+        raise HTTPException(_PROMO_EXC_STATUS[type(e)], database.PROMO_ERROR_MESSAGES[type(e)])
+
+    try:
+        result = await database.apply_promo_fixed(tg_id, code)
+        return {"type": "fixed", "bonus": result["bonus"], "new_bonus_balance": round(result["new_balance"], 2)}
+    except tuple(_PROMO_EXC_STATUS) as e:
+        raise HTTPException(_PROMO_EXC_STATUS[type(e)], database.PROMO_ERROR_MESSAGES[type(e)])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 # ── Аренда ИИ-аккаунтов ──────────────────────────────────────────────────────
@@ -606,11 +804,13 @@ class RentalOrderBody(BaseModel):
     service_id: int
     tariff_id:  int
     request_id: Optional[str] = None   # ключ идемпотентности (от Mini App)
+    use_bonus:  bool = False           # списывать ли сначала с бонусного баланса
 
 
 @app.post("/api/rental/order")
 async def rental_order(body: RentalOrderBody, x_telegram_init_data: str = Header(None)):
-    """Арендовать аккаунт: атомарно списать тенге + выдать свободный аккаунт.
+    """Арендовать аккаунт: атомарно списать тенге (+бонус, если включено) + выдать
+    свободный аккаунт.
 
     Whitelist-бесплатно здесь НЕТ: инвентарь конечен, платят все.
     """
@@ -625,6 +825,7 @@ async def rental_order(body: RentalOrderBody, x_telegram_init_data: str = Header
             service_id=body.service_id,
             tariff_id=body.tariff_id,
             idempotency_key=idem,
+            use_bonus=body.use_bonus,
         )
     except database.InsufficientFunds:
         balance = await database.get_tenge_balance(tg_id)
@@ -633,6 +834,7 @@ async def rental_order(body: RentalOrderBody, x_telegram_init_data: str = Header
         raise HTTPException(409, "Аккаунты закончились — нажмите «Уведомить», и мы напишем, когда освободится")
 
     res["balance"] = round(res.get("balance", 0), 2)
+    res["bonus_balance"] = round(res.get("bonus_balance", 0), 2)
     return res
 
 
@@ -703,6 +905,32 @@ async def admin_rental_tariff(body: RentalTariffBody, x_telegram_init_data: str 
         tariff_id=body.id,
     )
     return {"ok": True, "id": tid}
+
+
+class RentalServiceDeleteBody(BaseModel):
+    id: int
+
+
+@app.post("/api/admin/rental/service/delete")
+async def admin_rental_service_delete(body: RentalServiceDeleteBody, x_telegram_init_data: str = Header(None)):
+    await _get_admin(x_telegram_init_data)
+    ok = await database.delete_rental_service(body.id)
+    if not ok:
+        raise HTTPException(400, "Нельзя удалить: есть аккаунты на складе или заказы аренды по этому сервису")
+    return {"ok": True}
+
+
+class RentalTariffDeleteBody(BaseModel):
+    id: int
+
+
+@app.post("/api/admin/rental/tariff/delete")
+async def admin_rental_tariff_delete(body: RentalTariffDeleteBody, x_telegram_init_data: str = Header(None)):
+    await _get_admin(x_telegram_init_data)
+    ok = await database.delete_rental_tariff(body.id)
+    if not ok:
+        raise HTTPException(400, "Нельзя удалить: есть заказы аренды по этому тарифу")
+    return {"ok": True}
 
 
 @app.get("/api/admin/rental/accounts")
@@ -815,6 +1043,84 @@ async def admin_find_by_receipt(q: str, x_telegram_init_data: str = Header(None)
     if not result:
         raise HTTPException(404, "Чек не найден в базе данных")
     return result
+
+
+# -- Промокоды (админ) ---------------------------------------------------------
+
+class PromoCreateBody(BaseModel):
+    code: str
+    type: str
+    value: float
+    per_user_limit: int = 1
+    total_limit: Optional[int] = None
+    starts_at: Optional[str] = None
+    ends_at: Optional[str] = None
+
+
+@app.get("/api/admin/promo")
+async def admin_promo_list(x_telegram_init_data: str = Header(None)):
+    await _get_admin(x_telegram_init_data)
+    return {"promos": await database.list_promos()}
+
+
+@app.post("/api/admin/promo")
+async def admin_promo_create(body: PromoCreateBody, x_telegram_init_data: str = Header(None)):
+    await _get_admin(x_telegram_init_data)
+    try:
+        promo_id = await database.create_promo(
+            code=body.code, type_=body.type, value=body.value,
+            per_user_limit=body.per_user_limit, total_limit=body.total_limit,
+            starts_at=body.starts_at, ends_at=body.ends_at,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "id": promo_id}
+
+
+class PromoDeleteBody(BaseModel):
+    id: int
+
+
+@app.post("/api/admin/promo/delete")
+async def admin_promo_delete(body: PromoDeleteBody, x_telegram_init_data: str = Header(None)):
+    await _get_admin(x_telegram_init_data)
+    ok = await database.delete_promo(body.id)
+    if not ok:
+        raise HTTPException(404, "Промокод не найден")
+    return {"ok": True}
+
+
+# -- Рассылка (админ) -----------------------------------------------------------
+
+class BroadcastBody(BaseModel):
+    text: str
+
+
+async def _run_broadcast(admin_tg_id: int, ids: list[int], text: str):
+    sent = failed = 0
+    for uid in ids:
+        ok = await _bot_send(uid, text)
+        if ok:
+            sent += 1
+        else:
+            failed += 1
+        await asyncio.sleep(0.05)  # ~20 msg/s — с запасом от лимитов Bot API
+    await _bot_send(
+        admin_tg_id,
+        f"📣 Рассылка завершена: {sent} доставлено, {failed} не доставлено из {len(ids)}.",
+    )
+
+
+@app.post("/api/admin/broadcast")
+async def admin_broadcast(body: BroadcastBody, x_telegram_init_data: str = Header(None)):
+    admin = await _get_admin(x_telegram_init_data)
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(400, "Текст рассылки не может быть пустым")
+
+    ids = await database.get_all_user_ids(exclude_banned=True)
+    asyncio.create_task(_run_broadcast(admin["tg_id"], ids, text))
+    return {"ok": True, "total": len(ids)}
 
 
 # -- Ledger -------------------------------------------------------------------

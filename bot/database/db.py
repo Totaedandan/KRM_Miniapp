@@ -192,6 +192,33 @@ async def init_db(path: str):
                 added_at    TEXT NOT NULL
             );
 
+            -- ── Промокоды ──────────────────────────────────────
+            -- type: fixed (фикс. ₸) | percent (% от суммы пополнения, консьюмится
+            -- в момент подтверждения Kaspi-чека — см. redeem_promo_percent).
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                code               TEXT    UNIQUE NOT NULL,
+                type               TEXT    NOT NULL,
+                value              REAL    NOT NULL,
+                per_user_limit     INTEGER NOT NULL DEFAULT 1,
+                total_limit        INTEGER,
+                activations_count  INTEGER NOT NULL DEFAULT 0,
+                starts_at          TEXT,
+                ends_at            TEXT,
+                is_deleted         INTEGER NOT NULL DEFAULT 0,
+                created_at         TEXT    NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS promo_redemptions (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                promo_id         INTEGER NOT NULL,
+                user_id          INTEGER NOT NULL,
+                amount_credited  REAL    NOT NULL,
+                created_at       TEXT    NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_promo_redemptions_promo ON promo_redemptions(promo_id, user_id);
+
             CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id);
             CREATE INDEX IF NOT EXISTS idx_orders_user ON turnitin_orders(user_id);
             CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id);
@@ -206,6 +233,8 @@ async def init_db(path: str):
             "ALTER TABLE users ADD COLUMN pending_data TEXT DEFAULT NULL",
             "ALTER TABLE turnitin_orders ADD COLUMN is_premium INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE turnitin_orders ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE payments ADD COLUMN promo_code TEXT DEFAULT NULL",
+            "ALTER TABLE users ADD COLUMN bonus_balance REAL NOT NULL DEFAULT 0.0",
         ]:
             try:
                 await db.execute(col_sql)
@@ -227,6 +256,11 @@ async def init_db(path: str):
             "help_username":         "@support",
             "help_phone":            "",
             "free_users":            "",   # comma-separated tg_ids (whitelist)
+            # Пакеты токенов Хуманайзера (редактируются в админке)
+            "pkg1_tokens": "100",  "pkg1_tenge": "1000",
+            "pkg2_tokens": "250",  "pkg2_tenge": "2300",
+            "pkg3_tokens": "600",  "pkg3_tenge": "5200",
+            "pkg4_tokens": "1200", "pkg4_tenge": "9500",
         }
         for k, v in defaults.items():
             await db.execute(
@@ -289,7 +323,7 @@ async def _record_movement(
     type_: str,                 # 'debit' | 'credit'
     reason: str,
     amount: float,
-    currency: str = "tenge",    # 'tenge' | 'token'
+    currency: str = "tenge",    # 'tenge' | 'token' | 'bonus'
     order_id: Optional[int] = None,
     idempotency_key: Optional[str] = None,
     allow_overdraft: bool = True,
@@ -300,7 +334,7 @@ async def _record_movement(
     операция НЕ повторяется — возвращается ранее сохранённый balance_after.
     При allow_overdraft=False и нехватке средств бросает InsufficientFunds.
     """
-    col = "tenge_balance" if currency == "tenge" else "token_balance"
+    col = {"tenge": "tenge_balance", "token": "token_balance", "bonus": "bonus_balance"}[currency]
     async with aiosqlite.connect(_DB_PATH) as db:
         # Идемпотентность: уже проводили — ничего не делаем
         if idempotency_key:
@@ -393,6 +427,35 @@ async def get_premium_multiplier() -> float:
         return 1.5
 
 
+_PKG_DEFAULTS = [
+    (100, 1000), (250, 2300), (600, 5200), (1200, 9500),
+]
+
+
+async def get_token_packages() -> list[dict]:
+    """4 пакета токенов Хуманайзера — цены редактируются в админке (settings)."""
+    keys = [f"pkg{n}_{f}" for n in range(1, 5) for f in ("tokens", "tenge")]
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cur = await db.execute(
+            f"SELECT key,value FROM settings WHERE key IN ({','.join('?'*len(keys))})", keys
+        )
+        rows = {r[0]: r[1] for r in await cur.fetchall()}
+    packages = []
+    for i, (dtok, dtenge) in enumerate(_PKG_DEFAULTS, start=1):
+        packages.append({
+            "tokens": int(rows.get(f"pkg{i}_tokens", dtok)),
+            "tenge":  int(rows.get(f"pkg{i}_tenge", dtenge)),
+        })
+    return packages
+
+
+async def set_token_package(index: int, tokens: int, tenge: int):
+    if index not in (1, 2, 3, 4):
+        raise ValueError("index должен быть 1-4")
+    await set_setting(f"pkg{index}_tokens", str(int(tokens)))
+    await set_setting(f"pkg{index}_tenge", str(int(tenge)))
+
+
 async def get_active_file_paths() -> set[str]:
     """Пути файлов заказов, которые уже загружены и ждут/идут в обработке.
     Используется при очистке кэша, чтобы их не удалить."""
@@ -472,6 +535,13 @@ async def get_tenge_balance(tg_id: int) -> float:
         return float(row[0]) if row else 0.0
 
 
+async def get_bonus_balance(tg_id: int) -> float:
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cur = await db.execute("SELECT bonus_balance FROM users WHERE tg_id=?", (tg_id,))
+        row = await cur.fetchone()
+        return float(row[0]) if row else 0.0
+
+
 async def add_tenge(tg_id: int, amount: float, reason: str = "topup",
                     order_id: Optional[int] = None,
                     idempotency_key: Optional[str] = None) -> float:
@@ -489,6 +559,104 @@ async def deduct_tenge(tg_id: int, amount: float, reason: str = "debit",
         tg_id, "debit", reason, amount, currency="tenge",
         order_id=order_id, idempotency_key=idempotency_key,
     )
+
+
+async def add_bonus(tg_id: int, amount: float, reason: str = "promo_fixed",
+                    order_id: Optional[int] = None,
+                    idempotency_key: Optional[str] = None) -> float:
+    return await _record_movement(
+        tg_id, "credit", reason, amount, currency="bonus",
+        order_id=order_id, idempotency_key=idempotency_key,
+    )
+
+
+async def deduct_bonus(tg_id: int, amount: float, reason: str = "debit",
+                       order_id: Optional[int] = None,
+                       idempotency_key: Optional[str] = None) -> float:
+    """Списывает бонусный баланс (с записью в ledger). НЕ уходит ниже 0."""
+    return await _record_movement(
+        tg_id, "debit", reason, amount, currency="bonus",
+        order_id=order_id, idempotency_key=idempotency_key,
+    )
+
+
+async def _apply_bonus_debit(db, user_id: int, price: float, use_bonus: bool) -> tuple[float, float]:
+    """Списать `price` с уже открытой транзакции: сначала bonus_balance (если
+    use_bonus), остаток — с tenge_balance. Возвращает (bonus_used, tenge_used).
+
+    Guarded UPDATE считает сумму списания по ТЕКУЩЕМУ значению bonus_balance —
+    предварительный SELECT нужен только чтобы посчитать bonus_used/tenge_used для
+    ledger, а не для проверки достаточности (её делает сам guard, атомарно).
+    """
+    cur = await db.execute("SELECT bonus_balance FROM users WHERE tg_id=?", (user_id,))
+    row = await cur.fetchone()
+    bonus_bal = float(row[0]) if row else 0.0
+
+    bonus_used = round(min(bonus_bal, price), 2) if use_bonus else 0.0
+    tenge_used = round(price - bonus_used, 2)
+
+    cur = await db.execute(
+        "UPDATE users SET bonus_balance=bonus_balance-?, tenge_balance=tenge_balance-? "
+        "WHERE tg_id=? AND bonus_balance>=? AND tenge_balance>=?",
+        (bonus_used, tenge_used, user_id, bonus_used, tenge_used),
+    )
+    if cur.rowcount == 0:
+        await db.rollback()
+        raise InsufficientFunds()
+
+    return bonus_used, tenge_used
+
+
+async def debit_with_bonus(
+    user_id: int, price: float, use_bonus: bool, reason: str,
+    order_id: Optional[int] = None, idempotency_key: Optional[str] = None,
+) -> dict:
+    """Самостоятельное атомарное списание price (bonus сначала, потом tenge) вне
+    контекста создания заказа/аренды — используется покупкой токенов.
+
+    Возвращает {bonus_used, tenge_used, bonus_balance, tenge_balance}.
+    """
+    async with aiosqlite.connect(_DB_PATH) as db:
+        if idempotency_key:
+            cur = await db.execute(
+                "SELECT balance_after FROM transactions WHERE idempotency_key=?",
+                (idempotency_key,),
+            )
+            if await cur.fetchone():
+                cur = await db.execute(
+                    "SELECT bonus_balance, tenge_balance FROM users WHERE tg_id=?", (user_id,)
+                )
+                row = await cur.fetchone()
+                return {"bonus_used": 0.0, "tenge_used": 0.0,
+                        "bonus_balance": float(row[0]) if row else 0.0,
+                        "tenge_balance": float(row[1]) if row else 0.0,
+                        "duplicate": True}
+
+        bonus_used, tenge_used = await _apply_bonus_debit(db, user_id, price, use_bonus)
+
+        now = _now()
+        if bonus_used > 0:
+            cur = await db.execute("SELECT bonus_balance FROM users WHERE tg_id=?", (user_id,))
+            bonus_after = float((await cur.fetchone())[0])
+            await db.execute(
+                _tx_insert_sql(),
+                (user_id, order_id, "debit", reason, "bonus", bonus_used, bonus_after,
+                 f"{idempotency_key}:bonus" if idempotency_key else None, now),
+            )
+        if tenge_used > 0:
+            cur = await db.execute("SELECT tenge_balance FROM users WHERE tg_id=?", (user_id,))
+            tenge_after = float((await cur.fetchone())[0])
+            await db.execute(
+                _tx_insert_sql(),
+                (user_id, order_id, "debit", reason, "tenge", tenge_used, tenge_after,
+                 idempotency_key, now),
+            )
+        await db.commit()
+
+        cur = await db.execute("SELECT bonus_balance, tenge_balance FROM users WHERE tg_id=?", (user_id,))
+        row = await cur.fetchone()
+        return {"bonus_used": bonus_used, "tenge_used": tenge_used,
+                "bonus_balance": float(row[0]), "tenge_balance": float(row[1])}
 
 
 async def set_whitelist(tg_id: int, value: bool) -> bool:
@@ -589,14 +757,16 @@ async def create_paid_order(
     price: float,
     is_premium: bool = False,
     idempotency_key: Optional[str] = None,
+    use_bonus: bool = False,
 ) -> dict:
-    """Атомарно: списать тенге + создать заказ (queued) + записать в ledger.
+    """Атомарно: списать (бонус сначала, если use_bonus, потом тенге) + создать
+    заказ (queued) + записать в ledger.
 
     Всё в одной БД-транзакции — деньги не могут списаться без заказа и наоборот.
-    Возвращает {ok, duplicate, order_id, balance}.
+    Возвращает {ok, duplicate, order_id, balance, bonus_balance}.
       • duplicate=True  — этот idempotency_key уже проводился, повторно НЕ списываем,
         возвращаем ранее созданный order_id (защита от двойного тапа, п.8.1 ТЗ).
-      • InsufficientFunds — если баланса не хватило.
+      • InsufficientFunds — если баланса (тенге+бонус) не хватило.
     """
     now = _now()
     async with aiosqlite.connect(_DB_PATH) as db:
@@ -608,23 +778,18 @@ async def create_paid_order(
             )
             row = await cur.fetchone()
             if row:
-                return {"ok": True, "duplicate": True,
-                        "order_id": row[0], "balance": float(row[1])}
+                cur = await db.execute("SELECT bonus_balance FROM users WHERE tg_id=?", (user_id,))
+                brow = await cur.fetchone()
+                return {"ok": True, "duplicate": True, "order_id": row[0],
+                        "balance": float(row[1]), "bonus_balance": float(brow[0]) if brow else 0.0}
 
-        # 2. Атомарное списание (защита от гонок и ухода в минус)
-        cur = await db.execute(
-            "UPDATE users SET tenge_balance=tenge_balance-? "
-            "WHERE tg_id=? AND tenge_balance>=?",
-            (price, user_id, price),
-        )
-        if cur.rowcount == 0:
-            await db.rollback()
-            raise InsufficientFunds()
+        # 2. Атомарное списание (бонус сначала, потом тенге; защита от гонок и минуса)
+        bonus_used, tenge_used = await _apply_bonus_debit(db, user_id, price, use_bonus)
 
         cur = await db.execute(
-            "SELECT tenge_balance FROM users WHERE tg_id=?", (user_id,)
+            "SELECT tenge_balance, bonus_balance FROM users WHERE tg_id=?", (user_id,)
         )
-        balance = float((await cur.fetchone())[0])
+        balance, bonus_balance = (float(x) for x in await cur.fetchone())
 
         # 3. Создаём заказ
         cur = await db.execute(
@@ -637,13 +802,22 @@ async def create_paid_order(
         )
         order_id = cur.lastrowid
 
-        # 4. Журналируем списание (привязка к заказу)
+        # 4. Журналируем списание (привязка к заказу) — 1-2 строки в зависимости
+        #    от того, участвовал ли бонус
         try:
-            await db.execute(
-                _tx_insert_sql(),
-                (user_id, order_id, "debit", "order_charge", "tenge",
-                 price, balance, idempotency_key, now),
-            )
+            if bonus_used > 0:
+                await db.execute(
+                    _tx_insert_sql(),
+                    (user_id, order_id, "debit", "order_charge", "bonus",
+                     bonus_used, bonus_balance,
+                     f"{idempotency_key}:bonus" if idempotency_key else None, now),
+                )
+            if tenge_used > 0:
+                await db.execute(
+                    _tx_insert_sql(),
+                    (user_id, order_id, "debit", "order_charge", "tenge",
+                     tenge_used, balance, idempotency_key, now),
+                )
             await db.commit()
         except aiosqlite.IntegrityError:
             # Параллельный дубль успел записать ту же idempotency_key — откат,
@@ -655,12 +829,14 @@ async def create_paid_order(
             )
             row = await cur.fetchone()
             if row:
-                return {"ok": True, "duplicate": True,
-                        "order_id": row[0], "balance": float(row[1])}
+                cur = await db.execute("SELECT bonus_balance FROM users WHERE tg_id=?", (user_id,))
+                brow = await cur.fetchone()
+                return {"ok": True, "duplicate": True, "order_id": row[0],
+                        "balance": float(row[1]), "bonus_balance": float(brow[0]) if brow else 0.0}
             raise
 
-        return {"ok": True, "duplicate": False,
-                "order_id": order_id, "balance": balance}
+        return {"ok": True, "duplicate": False, "order_id": order_id,
+                "balance": balance, "bonus_balance": bonus_balance}
 
 
 async def get_order(order_id: int) -> Optional[dict]:
@@ -733,8 +909,22 @@ async def get_orders_by_status(statuses: tuple[str, ...]) -> list[dict]:
         return [dict(r) for r in await cur.fetchall()]
 
 
+async def _get_charge_split(order_id: int, reason: str) -> dict:
+    """{'bonus': X, 'tenge': Y} — сколько реально списано с каждой валюты на этот
+    заказ (по ledger). Для заказов до появления bonus_balance там будет только
+    'tenge' — обратная совместимость сохраняется сама собой."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT currency, SUM(amount) FROM transactions "
+            "WHERE order_id=? AND reason=? AND type='debit' GROUP BY currency",
+            (order_id, reason),
+        )
+        return {r[0]: float(r[1]) for r in await cur.fetchall()}
+
+
 async def cancel_order_with_refund(order_id: int, reason: str = "") -> dict:
-    """Отменить заказ и вернуть деньги на тенге-баланс пользователя.
+    """Отменить заказ и вернуть деньги пользователю — каждой валюте туда, откуда
+    списывалась (бонус → bonus_balance, тенге → tenge_balance), а не всё в тенге.
 
     Возвращает dict: {ok, refunded, user_id, report_type, is_premium, status_before, error?}.
     Возврат только если деньги реально списывались (amount_tenge>0 и не whitelist).
@@ -751,12 +941,22 @@ async def cancel_order_with_refund(order_id: int, reason: str = "") -> dict:
     if order.get("payment_method") != "whitelist" and amount > 0:
         # idempotency_key привязан к заказу → деньги не вернутся дважды,
         # даже если cancel вызван и по таймауту, и админом одновременно.
-        await add_tenge(
-            order["user_id"], amount,
-            reason="order_refund", order_id=order_id,
-            idempotency_key=f"refund:{order_id}",
-        )
-        refunded = amount
+        split = await _get_charge_split(order_id, "order_charge")
+        bonus_part = split.get("bonus", 0.0)
+        tenge_part = split.get("tenge", amount - bonus_part)
+        if bonus_part > 0:
+            await add_bonus(
+                order["user_id"], bonus_part,
+                reason="order_refund", order_id=order_id,
+                idempotency_key=f"refund:{order_id}:bonus",
+            )
+        if tenge_part > 0:
+            await add_tenge(
+                order["user_id"], tenge_part,
+                reason="order_refund", order_id=order_id,
+                idempotency_key=f"refund:{order_id}",
+            )
+        refunded = bonus_part + tenge_part
 
     await update_order(
         order_id,
@@ -785,15 +985,16 @@ async def create_payment(
     amount_stars: Optional[int] = None,
     tokens_amount: Optional[float] = None,
     order_id: Optional[int] = None,
+    promo_code: Optional[str] = None,
 ) -> int:
     async with aiosqlite.connect(_DB_PATH) as db:
         cur = await db.execute(
             """INSERT INTO payments
                (user_id, payment_type, purpose, amount_tenge, amount_stars,
-                tokens_amount, order_id, status, created_at)
-               VALUES (?,?,?,?,?,?,?,'pending',?)""",
+                tokens_amount, order_id, promo_code, status, created_at)
+               VALUES (?,?,?,?,?,?,?,?,'pending',?)""",
             (user_id, payment_type, purpose, amount_tenge, amount_stars,
-             tokens_amount, order_id, _now()),
+             tokens_amount, order_id, promo_code, _now()),
         )
         await db.commit()
         return cur.lastrowid
@@ -806,6 +1007,18 @@ async def confirm_payment(payment_id: int, receipt_id: Optional[str] = None, cha
             (_now(), receipt_id, charge_id, payment_id),
         )
         await db.commit()
+
+
+async def fail_payment(payment_id: int, status: str) -> bool:
+    """Пометить платёж как неуспешный (cancelled/expired/error от ApiPay). Не трогает уже
+    подтверждённый платёж — защита от гонки с опоздавшим/дублирующимся вебхуком."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE payments SET status=? WHERE id=? AND status!='confirmed'",
+            (status, payment_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -885,11 +1098,11 @@ async def reconcile_balances() -> list[dict]:
     mismatches: list[dict] = []
     async with aiosqlite.connect(_DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cur = await db.execute("SELECT tg_id, tenge_balance, token_balance FROM users")
+        cur = await db.execute("SELECT tg_id, tenge_balance, token_balance, bonus_balance FROM users")
         users = [dict(r) for r in await cur.fetchall()]
 
         for u in users:
-            for currency, col in (("tenge", "tenge_balance"), ("token", "token_balance")):
+            for currency, col in (("tenge", "tenge_balance"), ("token", "token_balance"), ("bonus", "bonus_balance")):
                 cur = await db.execute(
                     "SELECT COALESCE(SUM(CASE WHEN type='credit' THEN amount "
                     "ELSE -amount END), 0) FROM transactions "
@@ -1131,13 +1344,15 @@ async def create_rental_order(
     service_id: int,
     tariff_id: int,
     idempotency_key: Optional[str] = None,
+    use_bonus: bool = False,
 ) -> dict:
-    """Атомарно: списать тенге + захватить свободный аккаунт + создать аренду + ledger.
+    """Атомарно: списать (бонус сначала, если use_bonus, потом тенге) +
+    захватить свободный аккаунт + создать аренду + ledger.
 
     Всё в одной БД-транзакции. Ключ идемпотентности: rental:<tg_id>:<request_id>.
     Бросает InsufficientFunds / NoFreeAccount.
     Возвращает {ok, duplicate, order_id, service_name, tariff_name,
-                expires_at, login, password, balance}.
+                expires_at, login, password, balance, bonus_balance}.
     """
     from datetime import timedelta
     now = _now()
@@ -1151,8 +1366,10 @@ async def create_rental_order(
             row = await cur.fetchone()
             if row:
                 payload = await _rental_order_payload(db, row[0]) or {}
-                return {"ok": True, "duplicate": True,
-                        "balance": float(row[1]), **payload}
+                cur = await db.execute("SELECT bonus_balance FROM users WHERE tg_id=?", (user_id,))
+                brow = await cur.fetchone()
+                return {"ok": True, "duplicate": True, "balance": float(row[1]),
+                        "bonus_balance": float(brow[0]) if brow else 0.0, **payload}
 
         # 2. Тариф и сервис должны существовать и быть активными
         cur = await db.execute(
@@ -1168,19 +1385,12 @@ async def create_rental_order(
         price, duration_hours = float(tariff[0]), int(tariff[1])
 
         # 3. Атомарное списание (как в create_paid_order)
-        cur = await db.execute(
-            "UPDATE users SET tenge_balance=tenge_balance-? "
-            "WHERE tg_id=? AND tenge_balance>=?",
-            (price, user_id, price),
-        )
-        if cur.rowcount == 0:
-            await db.rollback()
-            raise InsufficientFunds()
+        bonus_used, tenge_used = await _apply_bonus_debit(db, user_id, price, use_bonus)
 
         cur = await db.execute(
-            "SELECT tenge_balance FROM users WHERE tg_id=?", (user_id,)
+            "SELECT tenge_balance, bonus_balance FROM users WHERE tg_id=?", (user_id,)
         )
-        balance = float((await cur.fetchone())[0])
+        balance, bonus_balance = (float(x) for x in await cur.fetchone())
 
         # 4. Захват свободного аккаунта. WHERE status='free' — защита от выдачи
         #    одного аккаунта двоим (single-writer SQLite сериализует транзакции).
@@ -1222,13 +1432,21 @@ async def create_rental_order(
             (order_id, account_id),
         )
 
-        # 6. Журналируем списание
+        # 6. Журналируем списание — 1-2 строки в зависимости от участия бонуса
         try:
-            await db.execute(
-                _tx_insert_sql(),
-                (user_id, order_id, "debit", "rental_charge", "tenge",
-                 price, balance, idempotency_key, now),
-            )
+            if bonus_used > 0:
+                await db.execute(
+                    _tx_insert_sql(),
+                    (user_id, order_id, "debit", "rental_charge", "bonus",
+                     bonus_used, bonus_balance,
+                     f"{idempotency_key}:bonus" if idempotency_key else None, now),
+                )
+            if tenge_used > 0:
+                await db.execute(
+                    _tx_insert_sql(),
+                    (user_id, order_id, "debit", "rental_charge", "tenge",
+                     tenge_used, balance, idempotency_key, now),
+                )
             await db.commit()
         except aiosqlite.IntegrityError:
             await db.rollback()
@@ -1239,12 +1457,15 @@ async def create_rental_order(
             row = await cur.fetchone()
             if row:
                 payload = await _rental_order_payload(db, row[0]) or {}
-                return {"ok": True, "duplicate": True,
-                        "balance": float(row[1]), **payload}
+                cur = await db.execute("SELECT bonus_balance FROM users WHERE tg_id=?", (user_id,))
+                brow = await cur.fetchone()
+                return {"ok": True, "duplicate": True, "balance": float(row[1]),
+                        "bonus_balance": float(brow[0]) if brow else 0.0, **payload}
             raise
 
         payload = await _rental_order_payload(db, order_id) or {}
-        return {"ok": True, "duplicate": False, "balance": balance, **payload}
+        return {"ok": True, "duplicate": False, "balance": balance,
+                "bonus_balance": bonus_balance, **payload}
 
 
 async def cancel_rental_with_refund(order_id: int, reason: str = "") -> dict:
@@ -1264,12 +1485,22 @@ async def cancel_rental_with_refund(order_id: int, reason: str = "") -> dict:
     refunded = 0.0
     if amount > 0:
         # rental_refund:<id> — отдельный namespace, не пересекается с refund:<id> (turnitin)
-        await add_tenge(
-            order["user_id"], amount,
-            reason="rental_refund", order_id=order_id,
-            idempotency_key=f"rental_refund:{order_id}",
-        )
-        refunded = amount
+        split = await _get_charge_split(order_id, "rental_charge")
+        bonus_part = split.get("bonus", 0.0)
+        tenge_part = split.get("tenge", amount - bonus_part)
+        if bonus_part > 0:
+            await add_bonus(
+                order["user_id"], bonus_part,
+                reason="rental_refund", order_id=order_id,
+                idempotency_key=f"rental_refund:{order_id}:bonus",
+            )
+        if tenge_part > 0:
+            await add_tenge(
+                order["user_id"], tenge_part,
+                reason="rental_refund", order_id=order_id,
+                idempotency_key=f"rental_refund:{order_id}",
+            )
+        refunded = bonus_part + tenge_part
 
     now = _now()
     async with aiosqlite.connect(_DB_PATH) as db:
@@ -1523,6 +1754,32 @@ async def upsert_rental_tariff(
         return cur.lastrowid
 
 
+async def delete_rental_service(service_id: int) -> bool:
+    """Удалить сервис из каталога. Нельзя, если есть аккаунты на складе или заказы аренды —
+    сначала нужно убрать их (защита от осиротевших ссылок в истории/складе)."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cur = await db.execute(
+            "DELETE FROM rental_services WHERE id=? "
+            "AND NOT EXISTS (SELECT 1 FROM rental_accounts WHERE service_id=?) "
+            "AND NOT EXISTS (SELECT 1 FROM rental_orders WHERE service_id=?)",
+            (service_id, service_id, service_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def delete_rental_tariff(tariff_id: int) -> bool:
+    """Удалить тариф. Нельзя, если по нему уже были заказы аренды (сохраняем историю)."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cur = await db.execute(
+            "DELETE FROM rental_tariffs WHERE id=? "
+            "AND NOT EXISTS (SELECT 1 FROM rental_orders WHERE tariff_id=?)",
+            (tariff_id, tariff_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
 async def get_rental_accounts(service_id: Optional[int] = None) -> list[dict]:
     async with aiosqlite.connect(_DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -1614,3 +1871,273 @@ async def get_active_rentals_admin() -> list[dict]:
             "WHERE ro.status='active' ORDER BY ro.expires_at"
         )
         return [dict(r) for r in await cur.fetchall()]
+
+
+# ═══════════════════════════════════════════════════════════════
+#  ПРОМОКОДЫ
+#
+#  type: fixed (фикс. ₸, редимится мгновенно) | percent (% от суммы
+#  пополнения — консьюмится в момент подтверждения Kaspi-чека, см.
+#  validate_promo_for_topup / redeem_promo_percent).
+#  Бонус всегда идёт в tenge_balance с отдельным ledger-reason
+#  (promo_fixed/promo_percent) — это и есть «бонусный баланс» по ТЗ,
+#  полностью прослеживаемый через transactions, без отдельной колонки.
+# ═══════════════════════════════════════════════════════════════
+
+class PromoNotFound(Exception):
+    """Промокод с таким кодом не найден (или удалён)."""
+
+
+class PromoNotActive(Exception):
+    """Срок действия промокода ещё не начался или уже истёк."""
+
+
+class PromoExhausted(Exception):
+    """Исчерпан общий лимит активаций промокода."""
+
+
+class PromoAlreadyUsed(Exception):
+    """Пользователь уже исчерпал свой лимит использований этого промокода."""
+
+
+PROMO_ERROR_MESSAGES = {
+    PromoNotFound:    "Промокод не найден.",
+    PromoNotActive:   "Срок действия этого промокода истёк.",
+    PromoExhausted:   "К сожалению, этот промокод больше недоступен.",
+    PromoAlreadyUsed: "Вы уже использовали этот промокод.",
+}
+
+
+def _normalize_promo_code(code: str) -> str:
+    return (code or "").strip().upper()
+
+
+def _parse_dt(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.rstrip("Z"))
+    except ValueError:
+        return None
+
+
+async def create_promo(
+    code: str,
+    type_: str,
+    value: float,
+    per_user_limit: int = 1,
+    total_limit: Optional[int] = None,
+    starts_at: Optional[str] = None,
+    ends_at: Optional[str] = None,
+) -> int:
+    """Создать промокод. Бросает ValueError на дубликат кода / некорректные поля."""
+    code = _normalize_promo_code(code)
+    if not code:
+        raise ValueError("Код не может быть пустым")
+    if type_ not in ("fixed", "percent"):
+        raise ValueError("Тип должен быть 'fixed' или 'percent'")
+    if value <= 0:
+        raise ValueError("Размер бонуса должен быть больше 0")
+    if per_user_limit < 1:
+        raise ValueError("Лимит на пользователя должен быть не меньше 1")
+    if total_limit is not None and total_limit < 1:
+        raise ValueError("Общий лимит должен быть не меньше 1")
+
+    async with aiosqlite.connect(_DB_PATH) as db:
+        try:
+            cur = await db.execute(
+                "INSERT INTO promo_codes(code,type,value,per_user_limit,total_limit,"
+                "activations_count,starts_at,ends_at,is_deleted,created_at) "
+                "VALUES(?,?,?,?,?,0,?,?,0,?)",
+                (code, type_, value, per_user_limit, total_limit, starts_at, ends_at, _now()),
+            )
+            await db.commit()
+            return cur.lastrowid
+        except aiosqlite.IntegrityError:
+            await db.rollback()
+            raise ValueError(f"Промокод '{code}' уже существует")
+
+
+def _promo_status(row: dict, now: datetime) -> str:
+    if row.get("total_limit") is not None and row["activations_count"] >= row["total_limit"]:
+        return "exhausted"
+    ends = _parse_dt(row.get("ends_at"))
+    if ends and now > ends:
+        return "expired"
+    starts = _parse_dt(row.get("starts_at"))
+    if starts and now < starts:
+        return "scheduled"
+    return "active"
+
+
+async def list_promos() -> list[dict]:
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM promo_codes WHERE is_deleted=0 ORDER BY id DESC"
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+    now = datetime.utcnow()
+    for r in rows:
+        r["status"] = _promo_status(r, now)
+    return rows
+
+
+async def delete_promo(promo_id: int) -> bool:
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE promo_codes SET is_deleted=1 WHERE id=? AND is_deleted=0", (promo_id,)
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def _find_active_promo(db, code: str) -> dict:
+    """SELECT промокода по коду + проверка окна действия (без per-user/total)."""
+    db.row_factory = aiosqlite.Row
+    cur = await db.execute(
+        "SELECT * FROM promo_codes WHERE code=? AND is_deleted=0", (code,)
+    )
+    row = await cur.fetchone()
+    if not row:
+        await db.rollback()
+        raise PromoNotFound()
+    promo = dict(row)
+
+    now = datetime.utcnow()
+    starts = _parse_dt(promo.get("starts_at"))
+    ends = _parse_dt(promo.get("ends_at"))
+    if (starts and now < starts) or (ends and now > ends):
+        await db.rollback()
+        raise PromoNotActive()
+
+    return promo
+
+
+async def _check_promo_user_limit(db, promo: dict, user_id: int):
+    cur = await db.execute(
+        "SELECT COUNT(*) FROM promo_redemptions WHERE promo_id=? AND user_id=?",
+        (promo["id"], user_id),
+    )
+    used = (await cur.fetchone())[0]
+    if used >= promo["per_user_limit"]:
+        await db.rollback()
+        raise PromoAlreadyUsed()
+
+
+async def validate_promo_for_topup(user_id: int, code: str) -> dict:
+    """Лёгкая пре-проверка percent-кода (окно действия + лимиты), без консьюминга.
+
+    Кидает PromoNotFound/PromoNotActive/PromoExhausted/PromoAlreadyUsed/ValueError.
+    """
+    code = _normalize_promo_code(code)
+    async with aiosqlite.connect(_DB_PATH) as db:
+        promo = await _find_active_promo(db, code)
+        if promo["type"] != "percent":
+            raise ValueError("Этот промокод активируется мгновенно, без пополнения")
+        if promo.get("total_limit") is not None and promo["activations_count"] >= promo["total_limit"]:
+            raise PromoExhausted()
+        await _check_promo_user_limit(db, promo, user_id)
+        return {"code": code, "type": promo["type"], "value": promo["value"]}
+
+
+async def apply_promo_fixed(user_id: int, code: str) -> dict:
+    """Мгновенное применение fixed-промокода. Атомарно: лимиты + баланс + ledger."""
+    code = _normalize_promo_code(code)
+    async with aiosqlite.connect(_DB_PATH) as db:
+        promo = await _find_active_promo(db, code)
+        if promo["type"] != "fixed":
+            raise ValueError("Этот промокод активируется при пополнении баланса")
+        await _check_promo_user_limit(db, promo, user_id)
+
+        cur = await db.execute(
+            "UPDATE promo_codes SET activations_count=activations_count+1 "
+            "WHERE id=? AND (total_limit IS NULL OR activations_count<total_limit)",
+            (promo["id"],),
+        )
+        if cur.rowcount == 0:
+            await db.rollback()
+            raise PromoExhausted()
+
+        now = _now()
+        await db.execute(
+            "UPDATE users SET bonus_balance=bonus_balance+? WHERE tg_id=?",
+            (promo["value"], user_id),
+        )
+        cur = await db.execute("SELECT bonus_balance FROM users WHERE tg_id=?", (user_id,))
+        row = await cur.fetchone()
+        new_balance = float(row[0]) if row else promo["value"]
+
+        await db.execute(
+            "INSERT INTO promo_redemptions(promo_id,user_id,amount_credited,created_at) "
+            "VALUES(?,?,?,?)",
+            (promo["id"], user_id, promo["value"], now),
+        )
+        await db.execute(
+            _tx_insert_sql(),
+            (user_id, None, "credit", "promo_fixed", "bonus",
+             promo["value"], new_balance, None, now),
+        )
+        await db.commit()
+        return {"bonus": promo["value"], "new_balance": new_balance}
+
+
+async def redeem_promo_percent(user_id: int, code: str, base_amount: float) -> dict:
+    """Финальное применение percent-промо в момент подтверждения пополнения.
+
+    Best-effort: любая ошибка валидации возвращается как {"applied": False, "reason": ...}
+    вместо исключения — базовое пополнение уже прошло и откатывать его нельзя.
+    """
+    code = _normalize_promo_code(code)
+    try:
+        async with aiosqlite.connect(_DB_PATH) as db:
+            promo = await _find_active_promo(db, code)
+            if promo["type"] != "percent":
+                raise ValueError("not a percent promo")
+            await _check_promo_user_limit(db, promo, user_id)
+
+            cur = await db.execute(
+                "UPDATE promo_codes SET activations_count=activations_count+1 "
+                "WHERE id=? AND (total_limit IS NULL OR activations_count<total_limit)",
+                (promo["id"],),
+            )
+            if cur.rowcount == 0:
+                await db.rollback()
+                raise PromoExhausted()
+
+            credited = round(base_amount * promo["value"] / 100, 2)
+            now = _now()
+            await db.execute(
+                "UPDATE users SET bonus_balance=bonus_balance+? WHERE tg_id=?",
+                (credited, user_id),
+            )
+            cur = await db.execute("SELECT bonus_balance FROM users WHERE tg_id=?", (user_id,))
+            row = await cur.fetchone()
+            new_balance = float(row[0]) if row else credited
+
+            await db.execute(
+                "INSERT INTO promo_redemptions(promo_id,user_id,amount_credited,created_at) "
+                "VALUES(?,?,?,?)",
+                (promo["id"], user_id, credited, now),
+            )
+            await db.execute(
+                _tx_insert_sql(),
+                (user_id, None, "credit", "promo_percent", "bonus",
+                 credited, new_balance, None, now),
+            )
+            await db.commit()
+            return {"applied": True, "bonus": credited, "new_balance": new_balance}
+    except (PromoNotFound, PromoNotActive, PromoExhausted, PromoAlreadyUsed) as e:
+        return {"applied": False, "reason": PROMO_ERROR_MESSAGES[type(e)]}
+    except ValueError:
+        return {"applied": False, "reason": "Промокод не подходит для пополнения"}
+
+
+async def get_all_user_ids(exclude_banned: bool = True) -> list[int]:
+    """Все tg_id пользователей — для рассылки."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        q = "SELECT tg_id FROM users"
+        if exclude_banned:
+            q += " WHERE is_banned=0"
+        cur = await db.execute(q)
+        return [r[0] for r in await cur.fetchall()]

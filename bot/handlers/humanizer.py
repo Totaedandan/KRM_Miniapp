@@ -165,7 +165,7 @@ async def _process_text(message: Message, state: FSMContext, text: str):
     if not is_wl:
         balance = await db.get_token_balance(message.from_user.id)
         if balance < cost:
-            packages = settings.get_humanizer_packages()
+            packages = await db.get_token_packages()
             await message.answer(
                 f"❌ <b>Недостаточно токенов!</b>\n\n"
                 f"Нужно: <b>{cost:.1f} 🪙</b> ({word_count} слов)\n"

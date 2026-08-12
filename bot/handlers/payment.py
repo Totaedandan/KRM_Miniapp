@@ -42,6 +42,7 @@ async def receive_topup_kaspi_pdf(message: Message, state: FSMContext):
     data = await state.get_data()
     payment_id = data.get("topup_payment_id")
     amount     = float(data.get("topup_amount", 0))
+    promo_code = data.get("topup_promo_code")
 
     file = await message.bot.get_file(doc.file_id)
     downloaded = await message.bot.download_file(file.file_path)
@@ -69,12 +70,20 @@ async def receive_topup_kaspi_pdf(message: Message, state: FSMContext):
         message.from_user.id, amount, reason="topup",
         idempotency_key=f"kaspi:{receipt.transaction_id}",
     )
+
+    bonus_line = ""
+    if promo_code:
+        promo_result = await db.redeem_promo_percent(message.from_user.id, promo_code, base_amount=amount)
+        if promo_result.get("applied"):
+            bonus_line = (f"\n🎁 Бонус по промокоду <b>{promo_code}</b>: "
+                          f"+{promo_result['bonus']:.0f} ₸ (бонусный баланс)")
+
     await state.clear()
 
     kb = open_app_inline()
     await message.answer(
         f"✅ <b>Баланс пополнен!</b>\n\n"
-        f"💰 Зачислено: <b>{amount:.0f} ₸</b>\n"
+        f"💰 Зачислено: <b>{amount:.0f} ₸</b>{bonus_line}\n"
         f"💰 Новый баланс: <b>{new_balance:.0f} ₸</b>",
         reply_markup=kb or main_menu_kb(),
     )
@@ -97,7 +106,7 @@ class TokenPayFSM(StatesGroup):
 @router.message(F.text == "💳 Купить токены")
 @router.callback_query(F.data == "buy_menu")
 async def buy_menu(event, state: FSMContext):
-    packages  = settings.get_humanizer_packages()
+    packages  = await db.get_token_packages()
     tg_id     = event.from_user.id
     tenge_bal = await db.get_tenge_balance(tg_id)
     token_bal = await db.get_token_balance(tg_id)
@@ -119,7 +128,7 @@ async def buy_menu(event, state: FSMContext):
 @router.callback_query(F.data.startswith("buy_tokens:"))
 async def choose_package(callback: CallbackQuery, state: FSMContext):
     idx = int(callback.data.split(":")[1]) - 1
-    packages = settings.get_humanizer_packages()
+    packages = await db.get_token_packages()
     if idx < 0 or idx >= len(packages):
         await callback.answer("Неверный пакет.")
         return
@@ -252,12 +261,13 @@ async def receive_topup_miniapp(message: Message, state: FSMContext):
     data       = pending.get("data", {})
     payment_id = data.get("payment_id")
     amount     = float(data.get("amount", 0))
+    promo_code = data.get("promo_code")
 
     if not payment_id or not amount:
         await message.answer("❌ Платёж не найден. Создайте новый через приложение.")
         return
 
     await db.clear_pending_action(message.from_user.id)
-    await state.update_data(topup_payment_id=payment_id, topup_amount=amount)
+    await state.update_data(topup_payment_id=payment_id, topup_amount=amount, topup_promo_code=promo_code)
     await state.set_state(TengeTopupFSM.waiting_kaspi_pdf)
     await receive_topup_kaspi_pdf(message, state)
