@@ -12,6 +12,12 @@ FastAPI — бэкенд для Telegram Mini App.
   POST /api/topup            — создать счёт ApiPay на пополнение баланса (Kaspi)
   GET  /api/topup/status     — статус пополнения (для поллинга из Mini App)
   POST /api/kaspi/webhook    — вебхук ApiPay (без initData, авторизация по подписи)
+  GET  /api/rental/services  — каталог аренды ИИ-аккаунтов (email+OTP)
+  GET  /api/rental/my        — аренды пользователя (active/history)
+  POST /api/rental/order     — арендовать (LRU-аккаунт, оплата тенге+бонус)
+  POST /api/rental/notify    — подписка на waitlist
+  GET  /api/rental/otp       — получить код входа для email своей аренды
+  POST /api/email-hook       — вебхук Cloudflare Worker (OTP), авторизация по X-Webhook-Secret
 
 Админские эндпоинты (только superadmin):
   GET  /api/admin/stats
@@ -35,6 +41,11 @@ FastAPI — бэкенд для Telegram Mini App.
   POST /api/admin/broadcast
   POST /api/admin/rental/service/delete
   POST /api/admin/rental/tariff/delete
+  GET  /api/admin/rental/orders
+  POST /api/admin/rental/cancel
+  GET/POST /api/admin/ai/proxies, POST /api/admin/ai/proxies/delete
+  GET/POST /api/admin/ai/accounts, POST /api/admin/ai/accounts/update|delete|force_logout
+  GET  /api/admin/ai/otp_logs
 """
 
 import asyncio
@@ -784,20 +795,21 @@ async def promo_apply(body: PromoApplyBody, x_telegram_init_data: str = Header(N
         raise HTTPException(400, str(e))
 
 
-# ── Аренда ИИ-аккаунтов ──────────────────────────────────────────────────────
+# ── Аренда ИИ-аккаунтов v2 (email+OTP, авто-разлогин, прокси-группы) ─────────
+# Каталог (rental_services/rental_tariffs) переиспользуется как есть.
 
 @app.get("/api/rental/services")
 async def rental_services(x_telegram_init_data: str = Header(None)):
     """Каталог сервисов аренды: тарифы, наличие, размер waitlist. Без кредов."""
     await _get_user(x_telegram_init_data)
-    return {"services": await database.get_rental_services_catalog()}
+    return {"services": await database.get_ai_services_catalog()}
 
 
 @app.get("/api/rental/my")
 async def rental_my(x_telegram_init_data: str = Header(None)):
-    """Аренды пользователя: активные с кредами + недавняя история без."""
+    """{'active': [...], 'history': [...]} — аренды пользователя (email вместо кредов)."""
     user = await _get_user(x_telegram_init_data)
-    return {"rentals": await database.get_user_rentals(user["tg_id"])}
+    return await database.get_user_ai_rentals(user["tg_id"])
 
 
 class RentalOrderBody(BaseModel):
@@ -810,7 +822,7 @@ class RentalOrderBody(BaseModel):
 @app.post("/api/rental/order")
 async def rental_order(body: RentalOrderBody, x_telegram_init_data: str = Header(None)):
     """Арендовать аккаунт: атомарно списать тенге (+бонус, если включено) + выдать
-    свободный аккаунт.
+    свободный (LRU) аккаунт по email.
 
     Whitelist-бесплатно здесь НЕТ: инвентарь конечен, платят все.
     """
@@ -819,7 +831,7 @@ async def rental_order(body: RentalOrderBody, x_telegram_init_data: str = Header
     idem = f"rental:{tg_id}:{body.request_id}" if body.request_id else None
 
     try:
-        res = await database.create_rental_order(
+        res = await database.create_ai_rental(
             user_id=tg_id,
             username=user.get("username"),
             service_id=body.service_id,
@@ -851,6 +863,43 @@ async def rental_notify(body: RentalNotifyBody, x_telegram_init_data: str = Head
         raise HTTPException(404, "Сервис не найден")
     await database.add_to_waitlist(body.service_id, user["tg_id"])
     return {"ok": True, "subscribed": True}
+
+
+@app.get("/api/rental/otp")
+async def rental_otp(email: str, x_telegram_init_data: str = Header(None)):
+    """Юзер жмёт «Получить код»: отдаём последний OTP, пришедший на email его
+    активной аренды (владение проверяется — иначе можно подсмотреть чужой код)."""
+    user = await _get_user(x_telegram_init_data)
+    email = email.strip().lower()
+    rental = await database.get_active_ai_rental_by_email(user["tg_id"], email)
+    if not rental:
+        raise HTTPException(403, "Этот email не привязан к вашей активной аренде")
+    code = await database.get_recent_otp(email)
+    if not code:
+        return {"ok": False, "code": None, "message": "Код ещё не пришёл, попробуйте через несколько секунд"}
+    return {"ok": True, "code": code}
+
+
+class EmailHookBody(BaseModel):
+    recipient_email: str
+    otp_code:        str
+
+
+@app.post("/api/email-hook")
+async def email_hook(body: EmailHookBody, x_webhook_secret: str = Header(None)):
+    """Приём OTP-кода от Cloudflare Worker (Email Routing → пересылка на этот
+    эндпоинт). Публичный (без Telegram initData) эндпоинт — защищён отдельным
+    заголовком-секретом, сверяемым constant-time."""
+    if not settings.EMAIL_WEBHOOK_SECRET or not x_webhook_secret or \
+       not hmac.compare_digest(x_webhook_secret, settings.EMAIL_WEBHOOK_SECRET):
+        raise HTTPException(401, "Invalid webhook secret")
+    code = re.sub(r"\D", "", body.otp_code)[:8]
+    if not code:
+        raise HTTPException(400, "otp_code пустой")
+    email = body.recipient_email.strip().lower()
+    await database.insert_otp_code(email, code)
+    logger.info(f"email-hook: OTP received for {email}")
+    return {"ok": True}
 
 
 # -- Аренда: админ --------------------------------------------------------------
@@ -933,86 +982,140 @@ async def admin_rental_tariff_delete(body: RentalTariffDeleteBody, x_telegram_in
     return {"ok": True}
 
 
-@app.get("/api/admin/rental/accounts")
-async def admin_rental_accounts(service_id: Optional[int] = None,
-                                x_telegram_init_data: str = Header(None)):
-    """Склад аккаунтов (с кредами — только для админа)."""
+# -- Аренда: админ — прокси -----------------------------------------------------
+
+@app.get("/api/admin/ai/proxies")
+async def admin_ai_proxies(x_telegram_init_data: str = Header(None)):
     await _get_admin(x_telegram_init_data)
-    return {"accounts": await database.get_rental_accounts(service_id)}
+    return {"proxies": await database.list_ai_proxies()}
 
 
-class RentalAccountBody(BaseModel):
-    service_id: int
-    login:      str
-    password:   str
-    note:       Optional[str] = ""
+class AiProxyBody(BaseModel):
+    proxy_url:    str          # http://user:pass@ip:port
+    max_accounts: int = 3
 
 
-@app.post("/api/admin/rental/account")
-async def admin_rental_account_add(body: RentalAccountBody, x_telegram_init_data: str = Header(None)):
+@app.post("/api/admin/ai/proxies")
+async def admin_ai_proxy_add(body: AiProxyBody, x_telegram_init_data: str = Header(None)):
     await _get_admin(x_telegram_init_data)
-    if not body.login.strip() or not body.password:
-        raise HTTPException(400, "Логин и пароль обязательны")
-    had_free = await database.count_free_accounts(body.service_id)
-    acc_id = await database.add_rental_account(
-        body.service_id, body.login.strip(), body.password, body.note or "",
-    )
-    # Сервис был пуст → ожидающим пора сообщить о наличии
-    if had_free == 0:
-        from services.rental_manager import rental_manager
-        await rental_manager.notify_waitlist(body.service_id)
-    return {"ok": True, "id": acc_id}
+    if not body.proxy_url.strip():
+        raise HTTPException(400, "proxy_url обязателен")
+    if body.max_accounts <= 0:
+        raise HTTPException(400, "max_accounts должен быть > 0")
+    pid = await database.create_ai_proxy(body.proxy_url.strip(), body.max_accounts)
+    return {"ok": True, "id": pid}
 
 
-class RentalAccountUpdateBody(BaseModel):
-    id:       int
-    status:   Optional[str] = None   # free | maintenance | disabled
-    login:    Optional[str] = None
-    password: Optional[str] = None
-    note:     Optional[str] = None
-
-
-@app.post("/api/admin/rental/account/update")
-async def admin_rental_account_update(body: RentalAccountUpdateBody,
-                                      x_telegram_init_data: str = Header(None)):
-    await _get_admin(x_telegram_init_data)
-    acc = await database.get_rental_account(body.id)
-    if not acc:
-        raise HTTPException(404, "Аккаунт не найден")
-    if body.status is not None:
-        if body.status not in ("free", "maintenance", "disabled"):
-            raise HTTPException(400, "Недопустимый статус")
-        if acc["status"] == "rented":
-            raise HTTPException(400, "Аккаунт сейчас арендован — сначала отмените аренду")
-    await database.update_rental_account(
-        body.id, status=body.status, login=body.login,
-        password=body.password, note=body.note,
-    )
-    # Вернулся в пул → уведомить waitlist («кто успел, тот арендовал»)
-    if body.status == "free" and acc["status"] != "free":
-        from services.rental_manager import rental_manager
-        await rental_manager.notify_waitlist(acc["service_id"])
-    return {"ok": True}
-
-
-class RentalAccountDeleteBody(BaseModel):
+class AiProxyDeleteBody(BaseModel):
     id: int
 
 
-@app.post("/api/admin/rental/account/delete")
-async def admin_rental_account_delete(body: RentalAccountDeleteBody,
-                                      x_telegram_init_data: str = Header(None)):
+@app.post("/api/admin/ai/proxies/delete")
+async def admin_ai_proxy_delete(body: AiProxyDeleteBody, x_telegram_init_data: str = Header(None)):
     await _get_admin(x_telegram_init_data)
-    ok = await database.delete_rental_account(body.id)
+    ok = await database.delete_ai_proxy(body.id)
+    if not ok:
+        raise HTTPException(400, "Нельзя удалить: к прокси привязаны аккаунты")
+    return {"ok": True}
+
+
+# -- Аренда: админ — аккаунты (email вместо логин/пароль) -----------------------
+
+@app.get("/api/admin/ai/accounts")
+async def admin_ai_accounts(service_id: Optional[int] = None,
+                             x_telegram_init_data: str = Header(None)):
+    await _get_admin(x_telegram_init_data)
+    return {"accounts": await database.list_ai_accounts(service_id)}
+
+
+class AiAccountBody(BaseModel):
+    service_id: int
+    email:      str
+    proxy_id:   Optional[int] = None
+
+
+@app.post("/api/admin/ai/accounts")
+async def admin_ai_account_add(body: AiAccountBody, x_telegram_init_data: str = Header(None)):
+    await _get_admin(x_telegram_init_data)
+    email = body.email.strip().lower()
+    if not email:
+        raise HTTPException(400, "Email обязателен")
+    catalog_before = await database.get_ai_services_catalog()
+    had_free = next((s["available"] for s in catalog_before if s["id"] == body.service_id), 0)
+    try:
+        acc_id = await database.add_ai_account(body.service_id, email, body.proxy_id)
+    except database.ProxyFull:
+        raise HTTPException(409, "У этого прокси уже максимум аккаунтов")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    # Сервис был пуст → ожидающим пора сообщить о наличии
+    if had_free == 0:
+        from services.ai_rental_manager import ai_rental_manager
+        await ai_rental_manager.notify_waitlist(body.service_id)
+    return {"ok": True, "id": acc_id}
+
+
+class AiAccountUpdateBody(BaseModel):
+    id:     int
+    status: str   # available | maintenance | disabled | banned
+
+
+@app.post("/api/admin/ai/accounts/update")
+async def admin_ai_account_update(body: AiAccountUpdateBody, x_telegram_init_data: str = Header(None)):
+    await _get_admin(x_telegram_init_data)
+    acc = await database.get_ai_account(body.id)
+    if not acc:
+        raise HTTPException(404, "Аккаунт не найден")
+    if body.status not in ("available", "cooldown", "maintenance", "disabled", "banned"):
+        raise HTTPException(400, "Недопустимый статус")
+    if acc["status"] == "rented":
+        raise HTTPException(400, "Аккаунт сейчас арендован — сначала отмените аренду")
+    was_free = acc["status"] == "available"
+    await database.update_ai_account_status(body.id, body.status)
+    # Вернулся в пул → уведомить waitlist («кто успел, тот арендовал»)
+    if body.status == "available" and not was_free:
+        from services.ai_rental_manager import ai_rental_manager
+        await ai_rental_manager.notify_waitlist(acc["service_id"])
+    return {"ok": True}
+
+
+class AiAccountIdBody(BaseModel):
+    id: int
+
+
+@app.post("/api/admin/ai/accounts/delete")
+async def admin_ai_account_delete(body: AiAccountIdBody, x_telegram_init_data: str = Header(None)):
+    await _get_admin(x_telegram_init_data)
+    ok = await database.delete_ai_account(body.id)
     if not ok:
         raise HTTPException(400, "Не найден или сейчас арендован")
     return {"ok": True}
 
 
+@app.post("/api/admin/ai/accounts/force_logout")
+async def admin_ai_account_force_logout(body: AiAccountIdBody, x_telegram_init_data: str = Header(None)):
+    """Вручную запустить авто-разлогин (повторная попытка для аккаунта в
+    maintenance, либо сервис без поддержки автоматизации — тогда задача сразу
+    вернёт False и статус останется maintenance для ручной проверки)."""
+    await _get_admin(x_telegram_init_data)
+    acc = await database.get_ai_account(body.id)
+    if not acc:
+        raise HTTPException(404, "Аккаунт не найден")
+    from services.ai_rental_manager import ai_rental_manager
+    asyncio.create_task(ai_rental_manager.logout_account(body.id))
+    return {"ok": True, "started": True}
+
+
+@app.get("/api/admin/ai/otp_logs")
+async def admin_ai_otp_logs(limit: int = 100, x_telegram_init_data: str = Header(None)):
+    await _get_admin(x_telegram_init_data)
+    return {"logs": await database.get_otp_logs(limit)}
+
+
 @app.get("/api/admin/rental/orders")
 async def admin_rental_orders(x_telegram_init_data: str = Header(None)):
     await _get_admin(x_telegram_init_data)
-    return {"rentals": await database.get_active_rentals_admin()}
+    return {"rentals": await database.get_active_ai_rentals_admin()}
 
 
 class RentalCancelBody(BaseModel):
@@ -1021,11 +1124,15 @@ class RentalCancelBody(BaseModel):
 
 @app.post("/api/admin/rental/cancel")
 async def admin_rental_cancel(body: RentalCancelBody, x_telegram_init_data: str = Header(None)):
-    """Отменить активную аренду с автовозвратом денег."""
+    """Отменить активную аренду с автовозвратом денег + постановкой реального
+    разлогина в очередь (cancel в БД сразу переводит аккаунт в cooldown как
+    защиту в глубину — здесь запускаем настоящий Playwright-разлогин)."""
     await _get_admin(x_telegram_init_data)
-    result = await database.cancel_rental_with_refund(body.order_id, reason="cancelled_by_admin")
+    result = await database.cancel_ai_rental_with_refund(body.order_id, reason="cancelled_by_admin")
     if not result.get("ok"):
         raise HTTPException(400, result.get("error", "Не удалось отменить"))
+    from services.ai_rental_manager import ai_rental_manager
+    asyncio.create_task(ai_rental_manager.logout_account(result["account_id"]))
     await _bot_send(
         result["user_id"],
         f"↩️ Аренда #{body.order_id} отменена администратором. "

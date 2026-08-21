@@ -185,6 +185,63 @@ async def init_db(path: str):
             CREATE INDEX IF NOT EXISTS idx_rental_orders_exp   ON rental_orders(status, expires_at);
             CREATE INDEX IF NOT EXISTS idx_rental_wait_svc     ON rental_waitlist(service_id);
 
+            -- ── Аренда ИИ-аккаунтов v2: email+OTP, авто-разлогин, прокси-группы ──
+            -- Заменяет rental_accounts/rental_orders (те таблицы не удаляются —
+            -- просто больше не используются, без риска потери исторических данных).
+            -- Каталог услуг/тарифов (rental_services/rental_tariffs) переиспользуется как есть.
+            CREATE TABLE IF NOT EXISTS ai_proxies (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                proxy_url     TEXT    NOT NULL,             -- http://user:pass@ip:port
+                max_accounts  INTEGER NOT NULL DEFAULT 3,
+                is_active     INTEGER NOT NULL DEFAULT 1,
+                created_at    TEXT    NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS ai_accounts (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                service_id        INTEGER NOT NULL,          -- → rental_services.id
+                email             TEXT    UNIQUE NOT NULL,   -- login@домен
+                proxy_id          INTEGER,                   -- → ai_proxies.id
+                cookies_data      TEXT,                      -- JSON сессии после логина
+                status            TEXT    NOT NULL DEFAULT 'available',
+                                  -- available|rented|cooldown|maintenance|banned
+                current_order_id  INTEGER,                   -- → ai_rentals.id (когда rented)
+                last_used_at      TEXT,
+                created_at        TEXT    NOT NULL,
+                updated_at        TEXT    NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS ai_rentals (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id        INTEGER NOT NULL,             -- tg_id
+                username       TEXT,
+                service_id     INTEGER NOT NULL,
+                tariff_id      INTEGER NOT NULL,
+                account_id     INTEGER NOT NULL,
+                amount_tenge   REAL    NOT NULL,
+                paid_bonus     REAL    NOT NULL DEFAULT 0,   -- для отображения в админке
+                paid_main      REAL    NOT NULL DEFAULT 0,   -- источник правды — ledger
+                status         TEXT    NOT NULL DEFAULT 'active',  -- active|expired|cancelled
+                starts_at      TEXT    NOT NULL,
+                expires_at     TEXT    NOT NULL,
+                reminder_sent  INTEGER NOT NULL DEFAULT 0,
+                created_at     TEXT    NOT NULL,
+                updated_at     TEXT    NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS otp_incoming_codes (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                recipient_email  TEXT    NOT NULL,
+                otp_code         TEXT    NOT NULL,
+                created_at       TEXT    NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_ai_accounts_svc   ON ai_accounts(service_id, status);
+            CREATE INDEX IF NOT EXISTS idx_ai_accounts_proxy ON ai_accounts(proxy_id);
+            CREATE INDEX IF NOT EXISTS idx_ai_rentals_user   ON ai_rentals(user_id);
+            CREATE INDEX IF NOT EXISTS idx_ai_rentals_exp    ON ai_rentals(status, expires_at);
+            CREATE INDEX IF NOT EXISTS idx_otp_email         ON otp_incoming_codes(recipient_email, created_at);
+
             CREATE TABLE IF NOT EXISTS banned_usernames (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 username    TEXT UNIQUE NOT NULL COLLATE NOCASE,
@@ -1682,14 +1739,17 @@ async def pop_waitlist(service_id: int) -> list[int]:
 # ── Админ: сервисы / тарифы / склад / аренды ────────────────────
 
 async def get_rental_services_admin() -> list[dict]:
-    """Все сервисы (включая выключенные) с тарифами и счётчиками склада."""
+    """Все сервисы (включая выключенные) с тарифами и счётчиками склада.
+
+    Счётчики берутся из ai_accounts (v2, email+OTP) — старая rental_accounts
+    больше не пополняется, только читается историческими заказами."""
     async with aiosqlite.connect(_DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             "SELECT s.*, "
-            " (SELECT COUNT(*) FROM rental_accounts a WHERE a.service_id=s.id AND a.status='free') AS cnt_free, "
-            " (SELECT COUNT(*) FROM rental_accounts a WHERE a.service_id=s.id AND a.status='rented') AS cnt_rented, "
-            " (SELECT COUNT(*) FROM rental_accounts a WHERE a.service_id=s.id AND a.status='maintenance') AS cnt_maintenance, "
+            " (SELECT COUNT(*) FROM ai_accounts a WHERE a.service_id=s.id AND a.status='available') AS cnt_free, "
+            " (SELECT COUNT(*) FROM ai_accounts a WHERE a.service_id=s.id AND a.status='rented') AS cnt_rented, "
+            " (SELECT COUNT(*) FROM ai_accounts a WHERE a.service_id=s.id AND a.status IN ('maintenance','cooldown','disabled','banned')) AS cnt_maintenance, "
             " (SELECT COUNT(*) FROM rental_waitlist w WHERE w.service_id=s.id) AS waiting "
             "FROM rental_services s ORDER BY s.sort_order, s.id"
         )
@@ -2141,3 +2201,530 @@ async def get_all_user_ids(exclude_banned: bool = True) -> list[int]:
             q += " WHERE is_banned=0"
         cur = await db.execute(q)
         return [r[0] for r in await cur.fetchall()]
+
+
+# ═══════════════════════════════════════════════════════════════
+#  АРЕНДА ИИ-АККАУНТОВ v2 (email+OTP, авто-разлогин, прокси-группы)
+#
+#  Каталог (rental_services/rental_tariffs) и waitlist (rental_waitlist)
+#  переиспользуются как есть — концепция «услуга + тариф на N часов» не
+#  изменилась. Новое — учёт прокси, аккаунтов по email (без пароля,
+#  логин через OTP) и сами аренды (ai_rentals вместо rental_orders).
+# ═══════════════════════════════════════════════════════════════
+
+class ProxyFull(Exception):
+    """У выбранного прокси уже max_accounts привязанных аккаунтов."""
+
+
+# ── Прокси ────────────────────────────────────────────────────────
+
+async def create_ai_proxy(proxy_url: str, max_accounts: int = 3) -> int:
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO ai_proxies(proxy_url,max_accounts,is_active,created_at) VALUES(?,?,1,?)",
+            (proxy_url, max_accounts, _now()),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def list_ai_proxies() -> list[dict]:
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT p.*, "
+            "(SELECT COUNT(*) FROM ai_accounts a WHERE a.proxy_id=p.id) AS accounts_count "
+            "FROM ai_proxies p ORDER BY p.id"
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def delete_ai_proxy(proxy_id: int) -> bool:
+    """Удалить прокси. Нельзя, если к нему ещё привязаны аккаунты."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cur = await db.execute(
+            "DELETE FROM ai_proxies WHERE id=? "
+            "AND NOT EXISTS (SELECT 1 FROM ai_accounts WHERE proxy_id=?)",
+            (proxy_id, proxy_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+# ── Аккаунты ──────────────────────────────────────────────────────
+
+async def add_ai_account(service_id: int, email: str, proxy_id: Optional[int] = None) -> int:
+    now = _now()
+    async with aiosqlite.connect(_DB_PATH) as db:
+        if proxy_id is not None:
+            cur = await db.execute(
+                "SELECT max_accounts, (SELECT COUNT(*) FROM ai_accounts WHERE proxy_id=?) "
+                "FROM ai_proxies WHERE id=?",
+                (proxy_id, proxy_id),
+            )
+            row = await cur.fetchone()
+            if not row:
+                await db.rollback()
+                raise ValueError("Прокси не найден")
+            max_accounts, current = row
+            if current >= max_accounts:
+                await db.rollback()
+                raise ProxyFull()
+        try:
+            cur = await db.execute(
+                "INSERT INTO ai_accounts(service_id,email,proxy_id,status,created_at,updated_at) "
+                "VALUES(?,?,?,'available',?,?)",
+                (service_id, email, proxy_id, now, now),
+            )
+            await db.commit()
+            return cur.lastrowid
+        except aiosqlite.IntegrityError:
+            await db.rollback()
+            raise ValueError(f"Email '{email}' уже используется")
+
+
+async def list_ai_accounts(service_id: Optional[int] = None) -> list[dict]:
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if service_id is not None:
+            cur = await db.execute(
+                "SELECT * FROM ai_accounts WHERE service_id=? ORDER BY id DESC", (service_id,)
+            )
+        else:
+            cur = await db.execute("SELECT * FROM ai_accounts ORDER BY id DESC")
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_ai_account(account_id: int) -> Optional[dict]:
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM ai_accounts WHERE id=?", (account_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def update_ai_account_status(account_id: int, status: str) -> bool:
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE ai_accounts SET status=?, updated_at=? WHERE id=?",
+            (status, _now(), account_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def save_ai_account_cookies(account_id: int, cookies_json: str):
+    async with aiosqlite.connect(_DB_PATH) as db:
+        await db.execute(
+            "UPDATE ai_accounts SET cookies_data=?, updated_at=? WHERE id=?",
+            (cookies_json, _now(), account_id),
+        )
+        await db.commit()
+
+
+async def delete_ai_account(account_id: int) -> bool:
+    """Нельзя удалить аккаунт прямо сейчас в аренде."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cur = await db.execute(
+            "DELETE FROM ai_accounts WHERE id=? AND status!='rented'", (account_id,)
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+# ── Каталог с учётом наличия (переиспользует rental_services/rental_tariffs) ──
+
+async def get_ai_services_catalog() -> list[dict]:
+    """Активные сервисы с тарифами и наличием (email-аккаунты, без кредов)."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT s.id, s.name, s.description, s.icon, s.sort_order, "
+            " (SELECT COUNT(*) FROM ai_accounts a "
+            "   WHERE a.service_id=s.id AND a.status='available') AS available, "
+            " (SELECT COUNT(*) FROM rental_waitlist w "
+            "   WHERE w.service_id=s.id) AS waiting "
+            "FROM rental_services s WHERE s.is_active=1 "
+            "ORDER BY s.sort_order, s.id"
+        )
+        services = [dict(r) for r in await cur.fetchall()]
+        if not services:
+            return []
+        cur = await db.execute(
+            "SELECT id, service_id, name, duration_hours, price "
+            "FROM rental_tariffs WHERE is_active=1 ORDER BY sort_order, duration_hours"
+        )
+        tariffs = [dict(r) for r in await cur.fetchall()]
+    by_svc: dict[int, list] = {}
+    for t in tariffs:
+        by_svc.setdefault(t["service_id"], []).append(t)
+    for s in services:
+        s["tariffs"] = by_svc.get(s["id"], [])
+    return [s for s in services if s["tariffs"]]
+
+
+# ── LRU-выбор и создание аренды ──────────────────────────────────────
+
+async def _get_lru_account_id(db, service_id: int) -> Optional[int]:
+    """Тот свободный аккаунт, который отдыхал дольше всех (никогда не
+    использовавшиеся — первыми)."""
+    cur = await db.execute(
+        "SELECT id FROM ai_accounts WHERE service_id=? AND status='available' "
+        "ORDER BY (last_used_at IS NULL) DESC, last_used_at ASC LIMIT 1",
+        (service_id,),
+    )
+    row = await cur.fetchone()
+    return row[0] if row else None
+
+
+async def _ai_rental_payload(db, order_id: int) -> Optional[dict]:
+    db.row_factory = aiosqlite.Row
+    cur = await db.execute(
+        "SELECT r.id AS order_id, r.expires_at, r.status, "
+        "       a.email, rs.name AS service_name, rt.name AS tariff_name "
+        "FROM ai_rentals r "
+        "JOIN ai_accounts a ON a.id = r.account_id "
+        "JOIN rental_services rs ON rs.id = r.service_id "
+        "JOIN rental_tariffs rt ON rt.id = r.tariff_id "
+        "WHERE r.id=?",
+        (order_id,),
+    )
+    row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def create_ai_rental(
+    user_id: int,
+    username: Optional[str],
+    service_id: int,
+    tariff_id: int,
+    use_bonus: bool = False,
+    idempotency_key: Optional[str] = None,
+) -> dict:
+    """Атомарно: списать (бонус сначала, если use_bonus, потом тенге) + захватить
+    LRU-свободный аккаунт + создать аренду + ledger.
+
+    Возвращает {ok, duplicate, order_id, service_name, tariff_name, email,
+                expires_at, balance, bonus_balance}.
+    Бросает InsufficientFunds / NoFreeAccount.
+    """
+    from datetime import timedelta
+    now = _now()
+    async with aiosqlite.connect(_DB_PATH) as db:
+        # 1. Идемпотентность
+        if idempotency_key:
+            cur = await db.execute(
+                "SELECT order_id, balance_after FROM transactions WHERE idempotency_key=?",
+                (idempotency_key,),
+            )
+            row = await cur.fetchone()
+            if row:
+                payload = await _ai_rental_payload(db, row[0]) or {}
+                cur = await db.execute("SELECT bonus_balance FROM users WHERE tg_id=?", (user_id,))
+                brow = await cur.fetchone()
+                return {"ok": True, "duplicate": True, "balance": float(row[1]),
+                        "bonus_balance": float(brow[0]) if brow else 0.0, **payload}
+
+        # 2. Тариф должен существовать и быть активным
+        cur = await db.execute(
+            "SELECT price, duration_hours FROM rental_tariffs "
+            "WHERE id=? AND service_id=? AND is_active=1",
+            (tariff_id, service_id),
+        )
+        tariff = await cur.fetchone()
+        if not tariff:
+            await db.rollback()
+            raise NoFreeAccount()
+        price, duration_hours = float(tariff[0]), int(tariff[1])
+
+        # 3. Атомарное списание (бонус сначала, потом тенге)
+        bonus_used, tenge_used = await _apply_bonus_debit(db, user_id, price, use_bonus)
+
+        cur = await db.execute(
+            "SELECT tenge_balance, bonus_balance FROM users WHERE tg_id=?", (user_id,)
+        )
+        balance, bonus_balance = (float(x) for x in await cur.fetchone())
+
+        # 4. Захват LRU-свободного аккаунта
+        account_id = await _get_lru_account_id(db, service_id)
+        if account_id is None:
+            await db.rollback()
+            raise NoFreeAccount()
+        cur = await db.execute(
+            "UPDATE ai_accounts SET status='rented', updated_at=? WHERE id=? AND status='available'",
+            (now, account_id),
+        )
+        if cur.rowcount == 0:
+            await db.rollback()
+            raise NoFreeAccount()
+
+        # 5. Создаём аренду
+        expires_at = (datetime.utcnow() + timedelta(hours=duration_hours)).isoformat()
+        cur = await db.execute(
+            "INSERT INTO ai_rentals(user_id,username,service_id,tariff_id,account_id,"
+            "amount_tenge,paid_bonus,paid_main,status,starts_at,expires_at,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,'active',?,?,?,?)",
+            (user_id, username, service_id, tariff_id, account_id, price,
+             bonus_used, tenge_used, now, expires_at, now, now),
+        )
+        order_id = cur.lastrowid
+        await db.execute(
+            "UPDATE ai_accounts SET current_order_id=?, last_used_at=? WHERE id=?",
+            (order_id, now, account_id),
+        )
+
+        # 6. Журналируем списание
+        try:
+            if bonus_used > 0:
+                await db.execute(
+                    _tx_insert_sql(),
+                    (user_id, order_id, "debit", "ai_rental_charge", "bonus",
+                     bonus_used, bonus_balance,
+                     f"{idempotency_key}:bonus" if idempotency_key else None, now),
+                )
+            if tenge_used > 0:
+                await db.execute(
+                    _tx_insert_sql(),
+                    (user_id, order_id, "debit", "ai_rental_charge", "tenge",
+                     tenge_used, balance, idempotency_key, now),
+                )
+            await db.commit()
+        except aiosqlite.IntegrityError:
+            await db.rollback()
+            cur = await db.execute(
+                "SELECT order_id, balance_after FROM transactions WHERE idempotency_key=?",
+                (idempotency_key,),
+            )
+            row = await cur.fetchone()
+            if row:
+                payload = await _ai_rental_payload(db, row[0]) or {}
+                cur = await db.execute("SELECT bonus_balance FROM users WHERE tg_id=?", (user_id,))
+                brow = await cur.fetchone()
+                return {"ok": True, "duplicate": True, "balance": float(row[1]),
+                        "bonus_balance": float(brow[0]) if brow else 0.0, **payload}
+            raise
+
+        payload = await _ai_rental_payload(db, order_id) or {}
+        return {"ok": True, "duplicate": False, "balance": balance,
+                "bonus_balance": bonus_balance, **payload}
+
+
+async def get_user_ai_rentals(tg_id: int, history_limit: int = 10) -> dict:
+    """{'active': [...], 'history': [...]} — активные и недавние завершённые аренды юзера."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT r.id, r.status, r.starts_at, r.expires_at, r.amount_tenge, "
+            "       a.email, rs.name AS service_name, rs.icon, rt.name AS tariff_name "
+            "FROM ai_rentals r "
+            "JOIN ai_accounts a ON a.id = r.account_id "
+            "JOIN rental_services rs ON rs.id = r.service_id "
+            "JOIN rental_tariffs rt ON rt.id = r.tariff_id "
+            "WHERE r.user_id=? ORDER BY r.created_at DESC LIMIT 30",
+            (tg_id,),
+        )
+        rows = [dict(r) for r in await cur.fetchall()]
+    active = [r for r in rows if r["status"] == "active"]
+    history = [r for r in rows if r["status"] != "active"][:history_limit]
+    return {"active": active, "history": history}
+
+
+async def get_active_ai_rental_by_email(user_id: int, email: str) -> Optional[dict]:
+    """Проверка владения: активна ли у этого юзера аренда именно этого email."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT r.* FROM ai_rentals r JOIN ai_accounts a ON a.id=r.account_id "
+            "WHERE r.user_id=? AND a.email=? AND r.status='active'",
+            (user_id, email),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+# ── Отмена/возврат и истечение ───────────────────────────────────────
+
+async def cancel_ai_rental_with_refund(order_id: int, reason: str = "") -> dict:
+    """Отменить аренду (админ) с возвратом денег — каждой валюте туда, откуда
+    списывалась. Аккаунт переводится в 'cooldown' (та же логика, что при
+    естественном истечении) — вернётся в пул после стандартного окна cooldown
+    даже если немедленный форс-разлогин (вызывается отдельно из api.py через
+    ai_rental_manager) почему-то не сработает — защита в глубину.
+    """
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM ai_rentals WHERE id=?", (order_id,))
+        order = await cur.fetchone()
+    if not order:
+        return {"ok": False, "error": "not_found"}
+    order = dict(order)
+    if order["status"] != "active":
+        return {"ok": False, "error": "already_final", "status_before": order["status"]}
+
+    amount = float(order["amount_tenge"] or 0)
+    refunded = 0.0
+    if amount > 0:
+        split = await _get_charge_split(order_id, "ai_rental_charge")
+        bonus_part = split.get("bonus", 0.0)
+        tenge_part = split.get("tenge", amount - bonus_part)
+        if bonus_part > 0:
+            await add_bonus(
+                order["user_id"], bonus_part,
+                reason="ai_rental_refund", order_id=order_id,
+                idempotency_key=f"ai_rental_refund:{order_id}:bonus",
+            )
+        if tenge_part > 0:
+            await add_tenge(
+                order["user_id"], tenge_part,
+                reason="ai_rental_refund", order_id=order_id,
+                idempotency_key=f"ai_rental_refund:{order_id}",
+            )
+        refunded = bonus_part + tenge_part
+
+    now = _now()
+    async with aiosqlite.connect(_DB_PATH) as db:
+        await db.execute(
+            "UPDATE ai_rentals SET status='cancelled', updated_at=? WHERE id=?",
+            (now, order_id),
+        )
+        await db.execute(
+            "UPDATE ai_accounts SET status='cooldown', current_order_id=NULL, "
+            "updated_at=? WHERE id=? AND current_order_id=?",
+            (now, order["account_id"], order_id),
+        )
+        await db.commit()
+    return {"ok": True, "refunded": refunded, "user_id": order["user_id"],
+            "service_id": order["service_id"], "account_id": order["account_id"]}
+
+
+async def get_due_ai_rentals(now_iso: str) -> list[dict]:
+    """Активные аренды, у которых уже прошёл expires_at."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT r.*, rs.name AS service_name FROM ai_rentals r "
+            "JOIN rental_services rs ON rs.id = r.service_id "
+            "WHERE r.status='active' AND r.expires_at<=?",
+            (now_iso,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_ai_reminder_due_rentals(threshold_iso: str, now_iso: str) -> list[dict]:
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT r.*, rs.name AS service_name FROM ai_rentals r "
+            "JOIN rental_services rs ON rs.id = r.service_id "
+            "WHERE r.status='active' AND r.reminder_sent=0 "
+            "AND r.expires_at<=? AND r.expires_at>?",
+            (threshold_iso, now_iso),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def mark_ai_rental_reminder_sent(order_id: int):
+    async with aiosqlite.connect(_DB_PATH) as db:
+        await db.execute(
+            "UPDATE ai_rentals SET reminder_sent=1, updated_at=? WHERE id=?",
+            (_now(), order_id),
+        )
+        await db.commit()
+
+
+async def expire_ai_rental(order_id: int) -> Optional[dict]:
+    """Аренда истекла: статус → expired. Аккаунт НЕ трогаем здесь — это делает
+    ai_rental_manager после реального разлогина (Playwright), выставляя
+    cooldown/available сам. Возвращает данные для постановки в очередь разлогина,
+    либо None если уже обработано параллельно (idempotent-safe)."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM ai_rentals WHERE id=? AND status='active'", (order_id,)
+        )
+        order = await cur.fetchone()
+        if not order:
+            return None
+        order = dict(order)
+        now = _now()
+        cur = await db.execute(
+            "UPDATE ai_rentals SET status='expired', updated_at=? WHERE id=? AND status='active'",
+            (now, order_id),
+        )
+        if cur.rowcount == 0:
+            return None  # гонка — кто-то параллельно уже обработал
+        await db.commit()
+    return order
+
+
+async def get_active_ai_rentals_admin() -> list[dict]:
+    """Активные аренды для админки."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT r.id, r.user_id, r.username, r.amount_tenge, r.paid_bonus, r.paid_main, "
+            "       r.starts_at, r.expires_at, "
+            "       rs.name AS service_name, rt.name AS tariff_name, a.email "
+            "FROM ai_rentals r "
+            "JOIN rental_services rs ON rs.id = r.service_id "
+            "JOIN rental_tariffs rt ON rt.id = r.tariff_id "
+            "JOIN ai_accounts a ON a.id = r.account_id "
+            "WHERE r.status='active' ORDER BY r.expires_at"
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+# ── OTP-коды (принимаются с Cloudflare Worker) ───────────────────────
+
+async def insert_otp_code(email: str, code: str):
+    async with aiosqlite.connect(_DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO otp_incoming_codes(recipient_email,otp_code,created_at) VALUES(?,?,?)",
+            (email, code, _now()),
+        )
+        await db.commit()
+
+
+async def get_recent_otp(email: str, window_sec: int = 120) -> Optional[str]:
+    from datetime import timedelta
+    threshold = (datetime.utcnow() - timedelta(seconds=window_sec)).isoformat()
+    async with aiosqlite.connect(_DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT otp_code FROM otp_incoming_codes "
+            "WHERE recipient_email=? AND created_at>=? ORDER BY created_at DESC LIMIT 1",
+            (email, threshold),
+        )
+        row = await cur.fetchone()
+        return row[0] if row else None
+
+
+async def get_otp_logs(limit: int = 100) -> list[dict]:
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM otp_incoming_codes ORDER BY created_at DESC LIMIT ?", (limit,)
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+# ── Прокси/cooldown — используются воркером ai_rental_manager ────────
+
+async def get_ai_proxy(proxy_id: int) -> Optional[dict]:
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM ai_proxies WHERE id=?", (proxy_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def get_cooldown_accounts_due(threshold_iso: str) -> list[dict]:
+    """Аккаунты, которые дольше COOLDOWN_MIN сидят в cooldown — готовы вернуться
+    в available (updated_at выставляется при каждом переходе статуса, так что
+    отсчёт идёт именно с момента входа в cooldown)."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM ai_accounts WHERE status='cooldown' AND updated_at<=?",
+            (threshold_iso,),
+        )
+        return [dict(r) for r in await cur.fetchall()]

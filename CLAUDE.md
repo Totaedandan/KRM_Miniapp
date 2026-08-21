@@ -49,44 +49,76 @@ API: `POST /api/order` (поле `is_premium`), `GET /api/admin/queue`, `POST /a
 
 Константы: `PREMIUM_MULTIPLIER=1.5`, `FILE_TIMEOUT_SEC=180`, `MINUTES_PER_FILE=7`.
 
-## Аренда ИИ-аккаунтов (РЕАЛИЗОВАНО)
+## Аренда ИИ-аккаунтов v2 (РЕАЛИЗОВАНО — email+OTP, авто-разлогин, прокси-группы)
 
-Каталог аренды премиум-аккаунтов (ChatGPT Plus, Claude Pro и т.д.):
-выдача **полностью автоматическая** из заранее загруженного пула логинов/паролей.
+Полностью заменяет старую систему логин/пароль (см. ниже «старая версия»).
+Юзеру выдаётся **email на своём домене** (`login@EMAIL_DOMAIN`), код входа
+приходит на почту и перехватывается Cloudflare Worker'ом, по истечении аренды
+бэкенд сам разлогинивает аккаунт через Playwright. Аккаунты группируются по
+2-3 на один ISP-прокси с очередью разлогина, чтобы не долбить один IP параллельно.
 
-- **Таблицы** (`database/db.py`): `rental_services` (каталог), `rental_tariffs`
-  (часы/неделя/месяц/год, `duration_hours`, цена ₸), `rental_accounts` (склад кредов,
-  статусы `free|rented|maintenance|disabled`), `rental_orders` (`active|expired|cancelled`,
-  `expires_at` naive-UTC), `rental_waitlist` (UNIQUE(service_id, user_id)).
-- **Покупка**: `create_rental_order(...)` — атомарно в одной транзакции: списание тенге
-  (guard `tenge_balance>=?`) + захват аккаунта (guard `status='free'`, гонка за последний
-  аккаунт исключена) + INSERT аренды + ledger. Исключения: `InsufficientFunds` (402),
-  `NoFreeAccount` (409). Идемпотентность: `rental:<tg_id>:<request_id>`.
-- **Возврат**: `cancel_rental_with_refund` — ключ `rental_refund:<order_id>`
-  (НЕ `refund:<id>` — этот namespace занят turnitin). Аккаунт → `maintenance`.
-- **Воркер** `services/rental_manager.py` (старт из `main.py`): тик 60с — напоминание за
-  ~30 мин (`reminder_sent`) и истечение (заказ → `expired`, аккаунт → `maintenance`,
-  юзеру уведомление). Состояние в БД — рестарт ничего не теряет.
-- **Waitlist**: «Уведомить» → `POST /api/rental/notify`. Когда админ возвращает аккаунт
-  в `free` (после ротации пароля) или добавляет аккаунт в пустой сервис —
-  `rental_manager.notify_waitlist()` шлёт сообщение ВСЕМ ожидающим («кто успел»),
-  записи waitlist удаляются.
+- **Каталог переиспользуется как есть**: `rental_services`/`rental_tariffs` (те же
+  таблицы, что и в старой версии) — концепция «услуга + тариф на N часов» не менялась.
+- **Новые таблицы** (`database/db.py`): `ai_proxies` (`proxy_url`, `max_accounts`),
+  `ai_accounts` (`email` UNIQUE, `proxy_id`, `cookies_data` JSON, статусы
+  `available|rented|cooldown|maintenance|disabled|banned`), `ai_rentals` (аналог
+  rental_orders: `paid_bonus`/`paid_main` для отображения, источник правды — ledger),
+  `otp_incoming_codes` (`recipient_email`, `otp_code`, короткое окно жизни).
+  Старые `rental_accounts`/`rental_orders` НЕ удалены (не используются, история цела).
+- **Покупка**: `create_ai_rental(...)` — атомарно: `_apply_bonus_debit` (бонус
+  сначала, потом тенге) + захват **LRU-свободного** аккаунта (`ORDER BY
+  (last_used_at IS NULL) DESC, last_used_at ASC` — свежедобавленные и дольше
+  отдыхавшие уходят первыми) + INSERT `ai_rentals` + ledger (`reason=ai_rental_charge`).
+  Исключения: `InsufficientFunds` (402), `NoFreeAccount` (409). Идемпотентность:
+  `rental:<tg_id>:<request_id>`.
+- **Возврат**: `cancel_ai_rental_with_refund` — `_get_charge_split` возвращает
+  каждую валюту туда, откуда списалась (бонус/тенге), не всегда в тенге (иначе
+  можно отмыть бонус в реальные деньги через покупку+отмену). Аккаунт → `cooldown`.
+- **OTP**: `POST /api/email-hook` принимает `{recipient_email, otp_code}` от
+  Cloudflare Worker'а, авторизация — заголовок `X-Webhook-Secret` (constant-time
+  сравнение с `EMAIL_WEBHOOK_SECRET` из `.env`, **не Telegram initData** — это
+  внешний публичный вебхук). `GET /api/rental/otp?email=` — юзер запрашивает код,
+  владение email проверяется через `get_active_ai_rental_by_email` (нельзя
+  подсмотреть чужой код). Скрипт воркера — `cloudflare/email-worker.js`
+  (не задеплоен автоматически — вставляется вручную в Cloudflare Dashboard,
+  инструкция в шапке файла).
+- **Авто-разлогин**: `services/ai_rental_service.py` — Playwright, **новый
+  browser/context на каждую задачу** (не персистентный браузер, как у Turnitin),
+  `proxy={...}` привязан к прокси конкретного аккаунта. `auto_logout(account,
+  service_type, proxy_url)` логинится по сохранённым `cookies_data` →
+  `chatgpt.com/#settings` / `claude.ai/settings/account` → «Log out of all
+  devices/sessions». `service_type` берётся из `rental_services.icon`
+  (`openai`→chatgpt, `claude`→claude) — другие сервисы (grok/notion/figma/…)
+  авто-разлогин пока не поддерживают, уходят в `maintenance` для ручного разбора.
+  **Селекторы — первая версия**, потребуют донастройки на реальных страницах
+  (как было с Turnitin).
+- **Воркер** `services/ai_rental_manager.py` (заменил `rental_manager.py`, старт
+  из `main.py`): тик 60с — напоминания (~30 мин), истечение (`ai_rentals` →
+  `expired` сразу + `logout_account()` в фоне), cooldown→available через
+  `COOLDOWN_MIN=5` мин → `notify_waitlist`. Очередь на прокси — БЕЗ Redis/Celery
+  (в проекте их нет): `dict[proxy_id, asyncio.Lock]` + пауза `PROXY_GAP_SEC=20`
+  между задачами на одном IP. `logout_account()` публичный — дёргается также из
+  `api.py` при отмене админом и `force_logout`.
 - **API**: `GET /api/rental/services` (каталог, без кредов), `POST /api/rental/order`,
-  `GET /api/rental/my` (креды только у активных), `POST /api/rental/notify`.
-  Админ: `/api/admin/rental/services|service|tariff|accounts|account[/update|/delete]|orders|cancel`.
-  Whitelist-бесплатно у аренды НЕТ — инвентарь конечен, платят все.
-- **Пароли хранятся плейнтекстом** в SQLite: не логировать, не отдавать из каталога,
-  в админке замаскированы (tap-reveal).
-- `transactions.order_id` для reasons `rental_charge|rental_refund` ссылается на
-  `rental_orders.id` (иначе — `turnitin_orders.id`); различать по `reason`.
-- **Иконки сервисов**: `rental_services.icon` хранит либо ключ из `BRANDS` в
-  `mini_app/index.html` (официальные SVG-логотипы, заинлайнены: openai, claude, grok,
-  perplexity, gemini, figma, netflix, notion, microsoft, canva, midjourney), либо эмодзи —
-  компонент `RentIcon` разруливает сам. Монохромные логотипы (`currentColor`) адаптируются к теме.
-- **Мок-каталог**: `python _seed_rental_catalog.py` — идемпотентно заливает 12 сервисов
-  с тарифами и демо-аккаунтами (фейковые креды, перед продом заменить/удалить в админке).
-- Smoke-тест слоя БД: `python _test_rental_db.py` (временная БД: гонки, идемпотентность, возвраты).
-  E2E-тест API: `python _test_rental_api.py` (TestClient, реальная HMAC-авторизация initData).
+  `GET /api/rental/my` → `{active, history}`, `POST /api/rental/notify`,
+  `GET /api/rental/otp?email=`. Админ: `/api/admin/rental/service|tariff[/delete]`
+  (общий каталог), `/api/admin/ai/proxies[/delete]`,
+  `/api/admin/ai/accounts[/update|/delete|/force_logout]`, `/api/admin/ai/otp_logs`,
+  `/api/admin/rental/orders|cancel`. Whitelist-бесплатно НЕТ — платят все.
+- **Пароли не хранятся** — вход только через email+OTP, поэтому `cookies_data`
+  (сессия) — единственный секрет на аккаунте, не логировать/не отдавать из каталога.
+- Smoke-тест слоя БД: `python _test_ai_rental_db.py` (прокси-guard, LRU-выбор,
+  бонус+тенге списание/возврат, идемпотентность, cooldown-окно).
+
+### Старая версия (логин/пароль, НЕ используется, код/таблицы не удалены)
+
+`rental_accounts` (склад кредов, `free|rented|maintenance|disabled`),
+`create_rental_order`/`cancel_rental_with_refund`/`services/rental_manager.py` —
+не вызываются нигде в `api.py`/`main.py`. Оставлены нетронутыми ради истории
+заказов; когда v2 будет полностью проверена в проде, эти функции и таблицы
+можно удалить (см. TODO в памяти сессии).
+- **Мок-каталог старой версии**: `python _seed_rental_catalog.py` (использует
+  старые таблицы — актуальность под вопросом после перехода на v2).
 
 ## Mini App: дизайн-система
 

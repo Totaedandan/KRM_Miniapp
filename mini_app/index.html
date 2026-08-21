@@ -1057,19 +1057,12 @@ function RentalSheet({ service, user, onClose, onPurchased, onNav, onBalanceUpda
             </div>
             <div className="cred-row">
               <div style={{minWidth:0}}>
-                <div className="cred-lbl">Логин</div>
-                <div className="cred-val">{result.login}</div>
+                <div className="cred-lbl">Email для входа</div>
+                <div className="cred-val">{result.email}</div>
               </div>
-              <button className="btn-sm btn-sm-blue" onClick={() => copy(result.login,'Логин')}>{React.cloneElement(ICONS.copy,{width:15,height:15})}</button>
+              <button className="btn-sm btn-sm-blue" onClick={() => copy(result.email,'Email')}>{React.cloneElement(ICONS.copy,{width:15,height:15})}</button>
             </div>
-            <div className="cred-row">
-              <div style={{minWidth:0}}>
-                <div className="cred-lbl">Пароль</div>
-                <div className="cred-val">{result.password}</div>
-              </div>
-              <button className="btn-sm btn-sm-blue" onClick={() => copy(result.password,'Пароль')}>{React.cloneElement(ICONS.copy,{width:15,height:15})}</button>
-            </div>
-            <p style={{fontSize:12,marginTop:10,marginBottom:14}}>Данные доступа всегда под рукой — раздел «Аренда» → «Мои аренды».</p>
+            <p style={{fontSize:12,marginTop:10,marginBottom:14}}>Войдите на сервисе с этим email — код придёт на почту. Запросить код можно в разделе «Аренда» → «Мои аренды».</p>
             <button className="btn btn-primary" onClick={close}>Понятно</button>
           </>
         ) : (
@@ -1109,19 +1102,76 @@ function RentalSheet({ service, user, onClose, onPurchased, onNav, onBalanceUpda
   );
 }
 
+const OTP_COOLDOWN_SEC = 30;
+
+function OtpButton({ email, showToast }) {
+  const [loading, setLoading] = useState(false);
+  const [code, setCode] = useState(null);
+  const [cooldown, setCooldown] = useState(0);
+
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const t = setInterval(() => setCooldown(c => c > 0 ? c - 1 : 0), 1000);
+    return () => clearInterval(t);
+  }, [cooldown > 0]);
+
+  const getCode = async () => {
+    if (loading || cooldown > 0) return;
+    setLoading(true);
+    try {
+      const res = await api(`/api/rental/otp?email=${encodeURIComponent(email)}`);
+      if (res.ok && res.code) {
+        setCode(res.code);
+        navigator.vibrate?.(30);
+      } else {
+        showToast(res.message || 'Код ещё не пришёл, попробуйте через несколько секунд');
+      }
+    } catch(e) {
+      showToast(e.message);
+    } finally {
+      setLoading(false);
+      setCooldown(OTP_COOLDOWN_SEC);
+    }
+  };
+
+  const copy = () => code && navigator.clipboard?.writeText(code).then(() => showToast('Код скопирован'));
+
+  return (
+    <div style={{marginTop:10}} onClick={e => e.stopPropagation()}>
+      {code && (
+        <div className="cred-row">
+          <div style={{minWidth:0}}>
+            <div className="cred-lbl">Код входа</div>
+            <div className="cred-val" style={{fontSize:20,letterSpacing:2,fontWeight:800}}>{code}</div>
+          </div>
+          <button className="btn-sm btn-sm-blue" onClick={copy}>{React.cloneElement(ICONS.copy,{width:15,height:15})}</button>
+        </div>
+      )}
+      <button className="btn btn-secondary" style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'center',gap:8}}
+        onClick={getCode} disabled={loading || cooldown > 0}>
+        {loading
+          ? <><span className="spinner-sm" style={{borderTopColor:'var(--accent-2)'}}/> Запрашиваю…</>
+          : cooldown > 0
+            ? `Повторить через ${cooldown}с`
+            : <>{React.cloneElement(ICONS.key,{width:15,height:15})} {code ? 'Обновить код' : 'Получить код'}</>}
+      </button>
+    </div>
+  );
+}
+
 function RentalScreen({ user, onNav, onBalanceUpdate }) {
   const [toast, showToast] = useToast();
   const [services, setServices] = useState(null);
   const [rentals,  setRentals]  = useState([]);
   const [q,   setQ]   = useState('');
   const [sel, setSel] = useState(null);          // сервис в шите покупки
-  const [showCreds, setShowCreds] = useState({}); // rental_id → bool
+  const [expanded, setExpanded] = useState({});  // rental_id → bool
 
   const refresh = useCallback(async () => {
     try {
       const [svc, my] = await Promise.all([api('/api/rental/services'), api('/api/rental/my')]);
       setServices(svc.services || []);
-      setRentals(my.rentals || []);
+      setRentals([...(my.active || []), ...(my.history || [])]);
     } catch(e) { showToast('Ошибка загрузки: ' + e.message); setServices([]); }
   }, []);
   useEffect(() => { refresh(); }, []);
@@ -1153,7 +1203,7 @@ function RentalScreen({ user, onNav, onBalanceUpdate }) {
         <div className="sec-title">Мои аренды</div>
         {active.map(r => (
           <div key={r.id} className="card" style={{padding:16}}>
-            <div style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer'}} onClick={() => setShowCreds(p => ({...p,[r.id]:!p[r.id]}))}>
+            <div style={{display:'flex',alignItems:'center',gap:12,cursor:'pointer'}} onClick={() => setExpanded(p => ({...p,[r.id]:!p[r.id]}))}>
               <div className="rent-ico"><RentIcon icon={r.icon} size={24}/></div>
               <div style={{flex:1,minWidth:0}}>
                 <div style={{fontWeight:700,fontSize:15}}>{r.service_name}</div>
@@ -1164,15 +1214,12 @@ function RentalScreen({ user, onNav, onBalanceUpdate }) {
                 <div style={{fontSize:11,color:'var(--txt2)',marginTop:1}}>осталось</div>
               </div>
             </div>
-            {showCreds[r.id] && <div style={{marginTop:12}}>
-              <div className="cred-row">
-                <div style={{minWidth:0}}><div className="cred-lbl">Логин</div><div className="cred-val">{r.login}</div></div>
-                <button className="btn-sm btn-sm-blue" onClick={() => copy(r.login,'Логин')}>{React.cloneElement(ICONS.copy,{width:15,height:15})}</button>
-              </div>
+            {expanded[r.id] && <div style={{marginTop:12}}>
               <div className="cred-row" style={{marginBottom:0}}>
-                <div style={{minWidth:0}}><div className="cred-lbl">Пароль</div><div className="cred-val">{r.password}</div></div>
-                <button className="btn-sm btn-sm-blue" onClick={() => copy(r.password,'Пароль')}>{React.cloneElement(ICONS.copy,{width:15,height:15})}</button>
+                <div style={{minWidth:0}}><div className="cred-lbl">Email для входа</div><div className="cred-val">{r.email}</div></div>
+                <button className="btn-sm btn-sm-blue" onClick={(e) => { e.stopPropagation(); copy(r.email,'Email'); }}>{React.cloneElement(ICONS.copy,{width:15,height:15})}</button>
               </div>
+              <OtpButton email={r.email} showToast={showToast}/>
             </div>}
           </div>
         ))}
@@ -1323,8 +1370,10 @@ function AdminScreen({ toast }) {
   const [rentSvcSel,  setRentSvcSel]  = useState(null);   // фильтр склада по сервису
   const [svcForm,     setSvcForm]     = useState({ name:'', icon:'', description:'' });
   const [tariffForm,  setTariffForm]  = useState({ svc:null, name:'', hours:'', price:'' });
-  const [accForm,     setAccForm]     = useState({ login:'', password:'', note:'' });
-  const [showPass,    setShowPass]    = useState({});      // account_id → bool
+  const [accForm,     setAccForm]     = useState({ email:'', proxy_id:'' });
+  const [proxies,     setProxies]     = useState([]);
+  const [proxyForm,   setProxyForm]   = useState({ proxy_url:'', max_accounts:3 });
+  const [otpLogs,     setOtpLogs]     = useState([]);
   // Промокоды
   const [promos,     setPromos]     = useState([]);
   const [promoForm,  setPromoForm]  = useState({ code:'', type:'fixed', value:'', per_user_limit:1, total_limit:'', starts_at:'', ends_at:'' });
@@ -1334,8 +1383,10 @@ function AdminScreen({ toast }) {
   const [bcSending, setBcSending] = useState(false);
 
   const loadRentSvcs   = async () => { const d = await api('/api/admin/rental/services'); setRentSvcs(d.services||[]); };
-  const loadRentAccs   = async () => { const d = await api('/api/admin/rental/accounts'); setRentAccs(d.accounts||[]); };
+  const loadRentAccs   = async () => { const d = await api('/api/admin/ai/accounts'); setRentAccs(d.accounts||[]); };
   const loadRentOrders = async () => { const d = await api('/api/admin/rental/orders'); setRentOrders(d.rentals||[]); };
+  const loadProxies    = async () => { const d = await api('/api/admin/ai/proxies'); setProxies(d.proxies||[]); };
+  const loadOtpLogs    = async () => { const d = await api('/api/admin/ai/otp_logs'); setOtpLogs(d.logs||[]); };
   const loadPromos     = async () => { const d = await api('/api/admin/promo'); setPromos(d.promos||[]); };
 
   const go = async (v) => {
@@ -1352,8 +1403,10 @@ function AdminScreen({ toast }) {
       }
       if (v === 'settings') { const d = await api('/api/admin/settings'); setSettings2(d); setSettingEdit({...d}); }
       if (v === 'rental_services') { await loadRentSvcs(); }
-      if (v === 'rental_accounts') { await Promise.all([loadRentSvcs(), loadRentAccs()]); }
+      if (v === 'rental_accounts') { await Promise.all([loadRentSvcs(), loadRentAccs(), loadProxies()]); }
+      if (v === 'rental_proxies')  { await loadProxies(); }
       if (v === 'rental_orders')   { await loadRentOrders(); }
+      if (v === 'rental_otp_logs') { await loadOtpLogs(); }
       if (v === 'promo')   { await loadPromos(); }
     } catch(e) { toast('Ошибка: '+e.message); } finally { setLoading(false); }
   };
@@ -1366,8 +1419,10 @@ function AdminScreen({ toast }) {
     { v:'stats',     icon:'users',  label:'Статистика',  sub:'Пользователи' },
     { v:'orders',    icon:'inbox',  label:'Очереди',     sub:'Обычная + премиум' },
     { v:'rental_services', icon:'key',   label:'Аренда: каталог', sub:'Сервисы и тарифы' },
-    { v:'rental_accounts', icon:'users', label:'Аренда: склад',   sub:'Логины и пароли' },
+    { v:'rental_accounts', icon:'users', label:'Аренда: склад',   sub:'Email-аккаунты' },
+    { v:'rental_proxies',  icon:'cpu',   label:'Аренда: прокси',  sub:'ISP-группы' },
     { v:'rental_orders',   icon:'clock', label:'Аренда: активные',sub:'Отмена с возвратом' },
+    { v:'rental_otp_logs', icon:'inbox', label:'Аренда: OTP-логи',sub:'Входящие коды' },
     { v:'whitelist', icon:'shield', label:'Whitelist',   sub:'Бесплатный доступ' },
     { v:'banlist',   icon:'ban',    label:'Бан-лист',    sub:'Заблокированные' },
     { v:'user',      icon:'search', label:'Найти юзера', sub:'ID или @username' },
@@ -1984,40 +2039,48 @@ function AdminScreen({ toast }) {
   if (view === 'rental_accounts') {
     const accs = rentSvcSel ? rentAccs.filter(a => a.service_id === rentSvcSel) : rentAccs;
     const svcName = (id) => (rentSvcs.find(s => s.id === id) || {}).name || `#${id}`;
+    const proxyLabel = (id) => {
+      if (!id) return 'без прокси';
+      const p = proxies.find(x => x.id === id);
+      return p ? `${p.proxy_url.replace(/^https?:\/\//,'').split('@').pop()} (${p.accounts_count}/${p.max_accounts})` : `#${id}`;
+    };
     const addAcc = async () => {
       if (!rentSvcSel) { toast('Сначала выберите сервис'); return; }
-      if (!accForm.login.trim() || !accForm.password) { toast('Логин и пароль обязательны'); return; }
+      if (!accForm.email.trim()) { toast('Email обязателен'); return; }
       try {
-        await api('/api/admin/rental/account', { method:'POST', body: JSON.stringify({
-          service_id: rentSvcSel, login: accForm.login.trim(), password: accForm.password, note: accForm.note,
+        await api('/api/admin/ai/accounts', { method:'POST', body: JSON.stringify({
+          service_id: rentSvcSel, email: accForm.email.trim(),
+          proxy_id: accForm.proxy_id ? parseInt(accForm.proxy_id) : null,
         })});
-        toast('Аккаунт добавлен'); setAccForm({ login:'', password:'', note:'' });
+        toast('Аккаунт добавлен'); setAccForm({ email:'', proxy_id:'' });
         await Promise.all([loadRentAccs(), loadRentSvcs()]);
       } catch(e) { toast('Ошибка: '+e.message); }
     };
     const setStatus = async (a, status) => {
       try {
-        await api('/api/admin/rental/account/update', { method:'POST', body: JSON.stringify({ id:a.id, status })});
-        toast(status === 'free' ? 'В пуле (waitlist уведомлён)' : 'Обновлено');
+        await api('/api/admin/ai/accounts/update', { method:'POST', body: JSON.stringify({ id:a.id, status })});
+        toast(status === 'available' ? 'В пуле (waitlist уведомлён)' : 'Обновлено');
         await Promise.all([loadRentAccs(), loadRentSvcs()]);
       } catch(e) { toast('Ошибка: '+e.message); }
     };
-    const rotatePass = async (a) => {
-      const np = window.prompt(`Новый пароль для ${a.login}:`);
-      if (!np) return;
+    const forceLogout = async (a) => {
       try {
-        await api('/api/admin/rental/account/update', { method:'POST', body: JSON.stringify({ id:a.id, password:np })});
-        toast('Пароль обновлён'); await loadRentAccs();
+        await api('/api/admin/ai/accounts/force_logout', { method:'POST', body: JSON.stringify({ id:a.id })});
+        toast('Разлогин запущен в фоне — статус обновится через 1-2 минуты');
       } catch(e) { toast('Ошибка: '+e.message); }
     };
     const delAcc = async (a) => {
-      if (!window.confirm(`Удалить аккаунт ${a.login}?`)) return;
+      if (!window.confirm(`Удалить аккаунт ${a.email}?`)) return;
       try {
-        await api('/api/admin/rental/account/delete', { method:'POST', body: JSON.stringify({ id:a.id })});
+        await api('/api/admin/ai/accounts/delete', { method:'POST', body: JSON.stringify({ id:a.id })});
         toast('Удалён'); await Promise.all([loadRentAccs(), loadRentSvcs()]);
       } catch(e) { toast('Ошибка: '+e.message); }
     };
-    const ACC_TAG = { free:['Свободен','tag-green'], rented:['Арендован','tag-blue'], maintenance:['Ремонт','tag-yellow'], disabled:['Выключен','tag-gray'] };
+    const ACC_TAG = {
+      available:['Свободен','tag-green'], rented:['Арендован','tag-blue'],
+      cooldown:['Остывает','tag-yellow'], maintenance:['Ремонт','tag-yellow'],
+      disabled:['Выключен','tag-gray'], banned:['Забанен','tag-red'],
+    };
     return (
       <div className="screen">
         <Back/><h2 style={{marginBottom:14}}>Аренда: склад</h2>
@@ -2030,11 +2093,15 @@ function AdminScreen({ toast }) {
         </div>
         {rentSvcSel && <>
           <div className="adm-row">
-            <input className="adm-input" placeholder="Логин / email" value={accForm.login} onChange={e=>setAccForm(f=>({...f,login:e.target.value}))}/>
-            <input className="adm-input" placeholder="Пароль" value={accForm.password} onChange={e=>setAccForm(f=>({...f,password:e.target.value}))}/>
+            <input className="adm-input" placeholder="Email (login@домен)" value={accForm.email} onChange={e=>setAccForm(f=>({...f,email:e.target.value}))}/>
           </div>
           <div className="adm-row">
-            <input className="adm-input" placeholder="Заметка (необязательно)" value={accForm.note} onChange={e=>setAccForm(f=>({...f,note:e.target.value}))}/>
+            <select className="adm-input" style={{flex:1}} value={accForm.proxy_id} onChange={e=>setAccForm(f=>({...f,proxy_id:e.target.value}))}>
+              <option value="">Без прокси</option>
+              {proxies.map(p => <option key={p.id} value={p.id} disabled={p.accounts_count>=p.max_accounts}>
+                {proxyLabel(p.id)}{p.accounts_count>=p.max_accounts?' — занят':''}
+              </option>)}
+            </select>
             <button className="btn-sm btn-sm-green" onClick={addAcc}>Добавить</button>
           </div>
         </>}
@@ -2044,18 +2111,18 @@ function AdminScreen({ toast }) {
             <div key={a.id} className="card" style={{padding:'12px 14px'}}>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8}}>
                 <div style={{flex:1,minWidth:0}}>
-                  <div style={{fontWeight:700,fontSize:14,wordBreak:'break-all'}}>{a.login}</div>
-                  <div style={{fontSize:12,color:'var(--txt2)',marginTop:2,cursor:'pointer'}} onClick={()=>setShowPass(p=>({...p,[a.id]:!p[a.id]}))}>
-                    {showPass[a.id] ? a.password : '••••••••'} {!rentSvcSel && `· ${svcName(a.service_id)}`}{a.note ? ` · ${a.note}` : ''}
+                  <div style={{fontWeight:700,fontSize:14,wordBreak:'break-all'}}>{a.email}</div>
+                  <div style={{fontSize:12,color:'var(--txt2)',marginTop:2}}>
+                    {proxyLabel(a.proxy_id)} {!rentSvcSel && `· ${svcName(a.service_id)}`}
                   </div>
                 </div>
                 <span className={`tag ${cls}`}>{lbl}</span>
               </div>
               <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:9}}>
                 {a.status !== 'rented' && <>
-                  {a.status !== 'free' && <button className="btn-sm btn-sm-green" onClick={()=>setStatus(a,'free')}>Свободен</button>}
-                  {a.status === 'free' && <button className="btn-sm btn-sm-gray" onClick={()=>setStatus(a,'maintenance')}>В ремонт</button>}
-                  <button className="btn-sm btn-sm-blue" onClick={()=>rotatePass(a)}>Пароль</button>
+                  {a.status !== 'available' && <button className="btn-sm btn-sm-green" onClick={()=>setStatus(a,'available')}>Свободен</button>}
+                  {a.status !== 'maintenance' && <button className="btn-sm btn-sm-gray" onClick={()=>setStatus(a,'maintenance')}>В ремонт</button>}
+                  <button className="btn-sm btn-sm-blue" onClick={()=>forceLogout(a)}>Вылогинить</button>
                   <button className="btn-sm btn-sm-red" onClick={()=>delAcc(a)}>Удалить</button>
                 </>}
                 {a.status === 'rented' && <span style={{fontSize:12,color:'var(--txt2)'}}>Аренда #{a.current_order_id} — отмена в «Аренда: активные»</span>}
@@ -2064,6 +2131,46 @@ function AdminScreen({ toast }) {
           );
         })}
         {!loading && accs.length === 0 && <p className="empty">{rentSvcSel ? 'Склад пуст — добавьте аккаунты' : 'Выберите сервис или добавьте его в каталоге'}</p>}
+      </div>
+    );
+  }
+
+  if (view === 'rental_proxies') {
+    const addProxy = async () => {
+      if (!proxyForm.proxy_url.trim()) { toast('Введите proxy_url'); return; }
+      try {
+        await api('/api/admin/ai/proxies', { method:'POST', body: JSON.stringify({
+          proxy_url: proxyForm.proxy_url.trim(), max_accounts: parseInt(proxyForm.max_accounts)||3,
+        })});
+        toast('Прокси добавлен'); setProxyForm({ proxy_url:'', max_accounts:3 }); await loadProxies();
+      } catch(e) { toast('Ошибка: '+e.message); }
+    };
+    const delProxy = async (p) => {
+      if (!window.confirm(`Удалить прокси ${p.proxy_url}?`)) return;
+      try {
+        await api('/api/admin/ai/proxies/delete', { method:'POST', body: JSON.stringify({ id:p.id })});
+        toast('Удалён'); await loadProxies();
+      } catch(e) { toast('Ошибка: '+e.message); }
+    };
+    return (
+      <div className="screen">
+        <Back/><h2 style={{marginBottom:4}}>Аренда: прокси</h2>
+        <p style={{marginBottom:14}}>2-3 аккаунта на 1 ISP-прокси — очередь разлогина не долбит один IP параллельно</p>
+        <div className="adm-row">
+          <input className="adm-input" placeholder="http://user:pass@ip:port" value={proxyForm.proxy_url} onChange={e=>setProxyForm(f=>({...f,proxy_url:e.target.value}))}/>
+          <input className="adm-input" type="number" placeholder="макс. аккаунтов" style={{maxWidth:100}} value={proxyForm.max_accounts} onChange={e=>setProxyForm(f=>({...f,max_accounts:e.target.value}))}/>
+          <button className="btn-sm btn-sm-green" onClick={addProxy}>Добавить</button>
+        </div>
+        {loading ? <Spinner/> : proxies.map(p => (
+          <div key={p.id} className="order-row">
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontWeight:600,fontSize:14,wordBreak:'break-all'}}>{p.proxy_url}</div>
+              <div className="order-meta">занято {p.accounts_count} / {p.max_accounts}</div>
+            </div>
+            <button className="btn-sm btn-sm-red" onClick={()=>delProxy(p)} disabled={p.accounts_count>0}>Удалить</button>
+          </div>
+        ))}
+        {!loading && proxies.length === 0 && <p className="empty">Прокси пока не добавлены</p>}
       </div>
     );
   }
@@ -2083,12 +2190,30 @@ function AdminScreen({ toast }) {
           <div key={r.id} className="order-row">
             <div style={{flex:1,minWidth:0}}>
               <div style={{fontWeight:600,fontSize:14}}>#{r.id} · {r.service_name} · @{r.username||r.user_id}</div>
-              <div className="order-meta">{r.account_login} · <b>{fmt(r.amount_tenge)} ₸</b> · ещё <Countdown expiresAt={r.expires_at}/></div>
+              <div className="order-meta">{r.email} · <b>{fmt(r.amount_tenge)} ₸</b> · ещё <Countdown expiresAt={r.expires_at}/></div>
             </div>
             <button className="btn-sm btn-sm-red" onClick={()=>cancelRent(r)}>Отменить</button>
           </div>
         ))}
         {!loading && rentOrders.length === 0 && <p className="empty">Активных аренд нет</p>}
+      </div>
+    );
+  }
+
+  if (view === 'rental_otp_logs') {
+    return (
+      <div className="screen">
+        <Back/><h2 style={{marginBottom:14}}>Аренда: OTP-логи</h2>
+        {loading ? <Spinner/> : otpLogs.map(l => (
+          <div key={l.id} className="order-row">
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontWeight:600,fontSize:14,wordBreak:'break-all'}}>{l.recipient_email}</div>
+              <div className="order-meta">{(l.created_at||'').slice(0,16)}</div>
+            </div>
+            <div style={{fontWeight:800,fontSize:16,letterSpacing:1}}>{l.otp_code}</div>
+          </div>
+        ))}
+        {!loading && otpLogs.length === 0 && <p className="empty">Кодов ещё не приходило</p>}
       </div>
     );
   }

@@ -29,7 +29,7 @@ from database import db
 from middlewares.register import RegisterMiddleware
 from handlers import start, turnitin, humanizer, payment, profile, admin, webapp
 from services.queue_manager import turnitin_queue
-from services.rental_manager import rental_manager
+from services.ai_rental_manager import ai_rental_manager
 
 
 async def run_api():
@@ -91,8 +91,8 @@ async def main():
     turnitin_queue.start(bot, settings)
     logger.info("Turnitin queue worker started")
 
-    # Воркер аренды ИИ-аккаунтов (истечение, напоминания)
-    rental_manager.start()
+    # Воркер аренды ИИ-аккаунтов (истечение, напоминания, авто-разлогин по прокси-очереди)
+    ai_rental_manager.start()
 
     logger.info(f"Bot started. Mini App API на порту {settings.MINI_APP_PORT}. Polling...")
 

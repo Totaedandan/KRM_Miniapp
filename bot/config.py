@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     APIPAY_API_KEY: str = ""
     APIPAY_WEBHOOK_SECRET: str = ""
 
+    # ── Аренда ИИ-аккаунтов v2 (email+OTP, авто-разлогин) ────────
+    EMAIL_DOMAIN: str = ""            # напр. mrk.uk — домен для выдачи email@domain
+    EMAIL_WEBHOOK_SECRET: str = ""    # секрет для проверки X-Webhook-Secret от Cloudflare Worker
+    TWOCAPTCHA_API_KEY: str = ""      # решение капчи при авто-разлогине (опционально)
+
     # ── Цены Turnitin (тенге) — переопределяются из БД settings ─
     DEFAULT_PRICE_SIM: int = 700       # только плагиат
     DEFAULT_PRICE_AI: int = 700        # только AI-детекция
