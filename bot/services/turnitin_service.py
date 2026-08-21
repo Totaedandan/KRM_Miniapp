@@ -34,7 +34,12 @@ FIND_BY_TEXT_JS = """(btnText) => {
     return deepFind(document);
 }"""
 
-# Найти кнопку три точки (actions menu) — только в строке сабмита (y > 300)
+# Найти кнопку три точки (actions menu). Раньше отсеивали кнопки шапки через
+# "y > 300", но после редизайна Turnitin (авг. 2026) шапка стала компактнее и
+# сама кнопка сабмита теперь рендерится на y~187 — этот эвристический порог
+# стал резать живую кнопку. data-px="more-options" сам по себе уникален среди
+# кнопок на странице (не пересекается ни с одной кнопкой шапки), доп. проверка
+# позиции больше не нужна.
 FIND_THREE_DOTS_JS = """() => {
     function deepFind(root) {
         for (const el of root.querySelectorAll('*')) {
@@ -44,8 +49,7 @@ FIND_THREE_DOTS_JS = """() => {
                 const data = el.getAttribute('data-px') || '';
                 if (aria.includes('Display actions menu') || data === 'more-options') {
                     const r = el.getBoundingClientRect();
-                    // y > 300 чтобы не поймать кнопки в шапке страницы
-                    if (r.width > 0 && r.y > 300) return {x: Math.round(r.x+r.width/2), y: Math.round(r.y+r.height/2)};
+                    if (r.width > 0) return {x: Math.round(r.x+r.width/2), y: Math.round(r.y+r.height/2)};
                 }
             }
         }
@@ -54,12 +58,19 @@ FIND_THREE_DOTS_JS = """() => {
     return deepFind(document);
 }"""
 
-# Найти активную filled-кнопку Submit
+# Найти активную filled-кнопку Submit. После редизайна (авг. 2026) Turnitin
+# частично переехал с компонентов "tdl-button-*" на новые "tii-grn-button-*"
+# (те же tii-grn-* веб-компоненты, что и в остальном Feedback Studio) — сама
+# Submit-кнопка теперь tii-grn-button-filled. Старые tdl-* кнопки кое-где ещё
+# встречаются на той же странице (частичная миграция), поэтому проверяем оба
+# варианта класса, а не просто заменяем один на другой.
 FIND_FILLED_BTN_JS = """() => {
     function deepFind(root) {
         for (const el of root.querySelectorAll('*')) {
             if (el.shadowRoot) { const f = deepFind(el.shadowRoot); if (f) return f; }
-            if (el.tagName === 'BUTTON' && el.className.includes('tdl-button-filled') && !el.disabled) {
+            if (el.tagName === 'BUTTON' &&
+                (el.className.includes('tdl-button-filled') || el.className.includes('tii-grn-button-filled')) &&
+                !el.disabled) {
                 const r = el.getBoundingClientRect();
                 if (r.width > 0 && r.height > 0)
                     return {x: Math.round(r.x+r.width/2), y: Math.round(r.y+r.height/2)};
@@ -344,24 +355,32 @@ class TurnitinService:
     async def _do_login(self, page: Page, email: str, password: str):
         logger.info("Logging in as %s...", email)
         await page.context.clear_cookies()
-        await page.goto(f"{BASE_URL}/login_page.asp", wait_until="domcontentloaded")
-        await asyncio.sleep(2)
+        # Turnitin в 2026 переехал на Angular SPA (home.turnitin.com/sign-in).
+        # Старый /login_page.asp просто редиректит сюда через 2 клиентских
+        # хопа (~3-5 доп. секунд) — заходим сразу на актуальный URL.
+        await page.goto("https://home.turnitin.com/sign-in", wait_until="domcontentloaded", timeout=30000)
 
+        # Angular-приложению нужно несколько секунд на гидратацию, прежде чем
+        # реальные <input> появятся в DOM (веб-компоненты tii-grn-text-input,
+        # id="sign-in-email"/"sign-in-password", type="text"/"password" —
+        # НЕ type="email"). Даём click() большой timeout вместо sleep() —
+        # Playwright сам поллит появление элемента, sleep(2) раньше не хватало
+        # и всё падало с Timeout ещё на этапе редиректа.
         await page.click(
-            'input[type="email"], input[name="email"], #email, input[placeholder*="email" i]',
-            timeout=8000
+            '#sign-in-email, input[type="email"], input[name="email"], #email, input[placeholder*="email" i]',
+            timeout=25000
         )
         await asyncio.sleep(0.3)
-        await page.keyboard.press("Meta+a")
+        await page.keyboard.press("Control+a")
         await page.keyboard.type(email, delay=50)
         await asyncio.sleep(0.3)
 
         await page.click(
-            'input[type="password"], input[name="password"], #password',
+            '#sign-in-password, input[type="password"], input[name="password"], #password',
             timeout=8000
         )
         await asyncio.sleep(0.3)
-        await page.keyboard.press("Meta+a")
+        await page.keyboard.press("Control+a")
         await page.keyboard.type(password, delay=50)
         await asyncio.sleep(0.3)
 
@@ -373,16 +392,20 @@ class TurnitinService:
             no_wait_after=True,  # <-- ключевое изменение
         )
 
-        # ✅ Ждём навигацию отдельно — 30 сек достаточно для медленного Turnitin
-        try:
-            await page.wait_for_load_state("domcontentloaded", timeout=30000)
-        except Exception:
-            pass  # Если уже загрузилась — игнорируем
+        # Новый sign-in — Angular SPA: сабмит формы шлёт XHR и делает клиентский
+        # (не браузерный) редирект после ответа сервера — wait_for_load_state
+        # тут бесполезен (обычной навигации/domcontentloaded не происходит),
+        # кнопка просто крутит спиннер, пока не придёт ответ. Поллим URL вместо
+        # фиксированного sleep — до ~20с, чего хватает даже под нагрузкой.
+        for _ in range(40):
+            await asyncio.sleep(0.5)
+            if "sign-in" not in page.url:
+                break
 
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)  # небольшой запас на дорисовку следующей страницы
 
         logger.info("After login URL: %s", page.url)
-        if "login_page" in page.url:
+        if "login_page" in page.url or "sign-in" in page.url:
             raise TurnitinError("Неверный логин или пароль Turnitin")
 
         logger.info("Login OK")
