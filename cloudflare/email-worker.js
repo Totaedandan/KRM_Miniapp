@@ -70,6 +70,14 @@ export default {
     const isSensitive = SENSITIVE_KEYWORDS.some((kw) => haystackLower.includes(kw));
     const otpMatch = isSensitive ? null : haystack.match(OTP_REGEX);
 
+    // ВРЕМЕННАЯ ДИАГНОСТИКА — смотрим в Cloudflare Logs, какой текст реально
+    // распознан и какие 6-значные числа в нём вообще есть (может их несколько,
+    // и regex хватает не то). Убрать после того, как разберёмся.
+    console.log("DEBUG subject:", subject);
+    console.log("DEBUG decoded body (first 800 chars):", decodedBody.slice(0, 800));
+    console.log("DEBUG all 6-digit matches:", haystack.match(/\b\d{6}\b/g));
+    console.log("DEBUG chosen match:", otpMatch ? otpMatch[1] : null, "isSensitive:", isSensitive);
+
     if (otpMatch) {
       const ok = await postOtp(env, to, otpMatch[1]);
       if (ok) return; // успешно передали в бэкенд — форвардить не нужно
