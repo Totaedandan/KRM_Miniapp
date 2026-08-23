@@ -48,15 +48,35 @@
  * ─────────────────────────────────────────────────────────────────────────
  */
 
-// 6-значный код — формат кодов ChatGPT/Claude/большинства сервисов.
-const OTP_REGEX = /\b(\d{6})\b/;
-
 // Ключевые слова, по которым письмо считается «чувствительным» (не OTP) —
 // такие форвардим админу вместо автоматической обработки.
 const SENSITIVE_KEYWORDS = [
   "password", "reset your password", "change your password", "recovery",
   "security alert", "suspicious", "пароль", "восстановлен", "безопасност",
 ];
+
+// Слова-подсказки рядом с настоящим кодом — используются, когда в письме
+// найдено НЕСКОЛЬКО 6-значных чисел. На живом письме от OpenAI, например,
+// кроме настоящего кода в HTML оказались CSS-цвет (#353740, случайно похож
+// на код) и технический id внутри MSO-условного комментария Outlook
+// (<!--[if mso]--> 554762 <!--[endif]-->, который структурно НЕЛЬЗЯ вырезать
+// как обычный HTML-комментарий — это два отдельных комментария с реальным
+// контентом между ними, так и задумано для рендеринга в Outlook). Поэтому
+// вместо попытки вычистить все возможные технические числа — при нескольких
+// кандидатах выбираем тот, что стоит рядом со словом-подсказкой.
+const CODE_HINT_RE = /(код|code|verification|confirm|passcode|otp)/i;
+const SIX_DIGITS_RE = /\b(\d{6})\b/g;
+
+function extractOtpCode(haystack) {
+  const matches = [...haystack.matchAll(SIX_DIGITS_RE)];
+  if (matches.length === 0) return null;
+  if (matches.length === 1) return matches[0][1];
+  for (const m of matches) {
+    const before = haystack.slice(Math.max(0, m.index - 60), m.index);
+    if (CODE_HINT_RE.test(before)) return m[1];
+  }
+  return matches[0][1]; // ни одна подсказка не нашлась — как раньше, первое совпадение
+}
 
 export default {
   async email(message, env, ctx) {
@@ -68,7 +88,7 @@ export default {
     const haystackLower = haystack.toLowerCase();
 
     const isSensitive = SENSITIVE_KEYWORDS.some((kw) => haystackLower.includes(kw));
-    const otpMatch = isSensitive ? null : haystack.match(OTP_REGEX);
+    const otpCode = isSensitive ? null : extractOtpCode(haystack);
 
     // ВРЕМЕННАЯ ДИАГНОСТИКА — смотрим в Cloudflare Logs, какой текст реально
     // распознан и какие 6-значные числа в нём вообще есть (может их несколько,
@@ -83,10 +103,10 @@ export default {
     console.log("DEBUG subject:", subject);
     console.log("DEBUG decoded body (first 1500 chars):", decodedBody.slice(0, 1500));
     console.log("DEBUG 6-digit matches with context:", matchesWithContext);
-    console.log("DEBUG chosen match:", otpMatch ? otpMatch[1] : null, "isSensitive:", isSensitive);
+    console.log("DEBUG chosen code:", otpCode, "isSensitive:", isSensitive);
 
-    if (otpMatch) {
-      const ok = await postOtp(env, to, otpMatch[1]);
+    if (otpCode) {
+      const ok = await postOtp(env, to, otpCode);
       if (ok) return; // успешно передали в бэкенд — форвардить не нужно
       // Вебхук не ответил ok — не теряем письмо молча, форвардим админу
     }
@@ -223,7 +243,12 @@ function decodePart(part) {
   let body = part.body;
   if (/base64/i.test(cte)) {
     body = decodeBase64Safe(body);
-  } else if (/quoted-printable/i.test(cte) || (!cte && looksQuotedPrintable(body))) {
+  } else if (/quoted-printable/i.test(cte) || looksQuotedPrintable(body)) {
+    // Content-based fallback работает ВСЕГДА, а не только когда cte пустой —
+    // на реальном письме от OpenAI заголовок Content-Transfer-Encoding
+    // находился, но, видимо, с чем-то, что не совпало с "quoted-printable"
+    // (нестандартное форматирование заголовков), и старая версия (!cte && ...)
+    // из-за этого пропускала декодирование целиком.
     body = decodeQuotedPrintable(body);
   }
   // Если Content-Type не нашёлся в заголовках, но тело явно HTML — считаем
@@ -231,6 +256,18 @@ function decodePart(part) {
   const ctype = ctypeHeader ? ctypeHeader.trim().toLowerCase()
                              : (looksLikeHtml(body) ? "text/html" : "text/plain");
   return { ctype, body };
+}
+
+// Вырезает то, что заведомо не может содержать настоящий код, но легко
+// содержит случайно похожие на код 6-значные числа: CSS в <style>, и
+// MSO-условные комментарии Outlook (<!--[if mso]>...<![endif]-->), в которых
+// часто сидят технические id. Именно оттуда пришли оба ложных совпадения на
+// живом письме от OpenAI (#353740 — цвет, 554762 — id внутри mso-комментария).
+function stripNonContent(html) {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<!--\[if[\s\S]*?<!\[endif\]-->/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ");
 }
 
 // Достаёт читаемый текст письма: приоритет text/plain, иначе text/html
@@ -242,7 +279,7 @@ function getDecodedText(raw) {
   if (plain) return plain.body;
 
   const html = parts.find((p) => p.ctype.startsWith("text/html"));
-  if (html) return html.body.replace(/<[^>]+>/g, " ");
+  if (html) return stripNonContent(html.body).replace(/<[^>]+>/g, " ");
 
   return parts.map((p) => p.body).join("\n");
 }
