@@ -13,11 +13,14 @@
  *   4. Любое другое неопознанное письмо — тоже форвардим админу (безопасный
  *      дефолт: лучше лишний форвард, чем молча потерянное письмо).
  *
- * ЭТО ПЕРВАЯ ВЕРСИЯ: парсинг — обычный regex по сырому телу письма (без
- * MIME-библиотек, т.к. Worker вставляется через Quick Edit одним файлом).
- * Многочастные/закодированные (base64) письма могут не распарситься с
- * первого раза — при необходимости донастроить REGEXPS ниже после того,
- * как увидите реальные письма от ChatGPT/Claude в логах.
+ * v2: письма от ChatGPT/Claude почти всегда multipart-MIME с base64 или
+ * quoted-printable кодировкой HTML/текстовой части. Первая версия искала
+ * 6 цифр прямо в сыром, ещё не раскодированном источнике письма — это могло
+ * зацепить случайную последовательность цифр из служебных частей (Message-ID,
+ * base64-блок картинки и т.п.) вместо настоящего кода. Теперь письмо сначала
+ * разбирается на MIME-части, каждая раскодируется по своему
+ * Content-Transfer-Encoding, и код ищется уже в реальном раскодированном
+ * тексте (text/plain в приоритете, иначе text/html с вырезанными тегами).
  *
  * ─────────────────────────────────────────────────────────────────────────
  * УСТАНОВКА (Cloudflare Dashboard):
@@ -39,6 +42,9 @@
  * 6. Тест: арендуйте любой аккаунт в Mini App, попросите код входа на его
  *    email — письмо должно долететь до /api/email-hook (смотрите логи
  *    Worker'а в Cloudflare Dashboard → Logs, и логи бота на сервере).
+ *
+ * После обновления кода в существующем Worker'е обязательно нажмите Deploy —
+ * иначе продолжит работать старая (уже задеплоенная) версия.
  * ─────────────────────────────────────────────────────────────────────────
  */
 
@@ -57,7 +63,8 @@ export default {
     const to = (message.to || "").toLowerCase().trim();
     const subject = (message.headers.get("subject") || "");
     const rawText = await streamToText(message.raw);
-    const haystack = `${subject}\n${rawText}`;
+    const decodedBody = getDecodedText(rawText);
+    const haystack = `${subject}\n${decodedBody}`;
     const haystackLower = haystack.toLowerCase();
 
     const isSensitive = SENSITIVE_KEYWORDS.some((kw) => haystackLower.includes(kw));
@@ -117,4 +124,79 @@ async function streamToText(stream) {
     offset += chunk.length;
   }
   return new TextDecoder("utf-8").decode(merged);
+}
+
+// ── Минимальный MIME-парсер (без внешних библиотек) ───────────────────────
+
+function decodeQuotedPrintable(str) {
+  return str
+    .replace(/=\r\n/g, "")
+    .replace(/=\n/g, "")
+    .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+function decodeBase64Safe(str) {
+  try {
+    return atob(str.replace(/[\r\n\s]/g, ""));
+  } catch (e) {
+    return str; // не смогли раскодировать — отдаём как есть, regex просто не найдёт совпадение
+  }
+}
+
+function splitHeadersAndBody(chunk) {
+  let idx = chunk.indexOf("\r\n\r\n");
+  let sepLen = 4;
+  if (idx === -1) {
+    idx = chunk.indexOf("\n\n");
+    sepLen = 2;
+  }
+  if (idx === -1) return { headers: "", body: chunk };
+  return { headers: chunk.slice(0, idx), body: chunk.slice(idx + sepLen) };
+}
+
+// Разбирает письмо (возможно вложенное multipart/*) на плоский список частей.
+function extractMimeParts(raw) {
+  const top = splitHeadersAndBody(raw);
+  const boundaryMatch = top.headers.match(/boundary="?([^"\r\n;]+)"?/i);
+  if (!boundaryMatch) return [top];
+
+  const boundary = boundaryMatch[1];
+  const rawParts = top.body.split(`--${boundary}`).slice(1, -1);
+  const parts = [];
+  for (const chunk of rawParts) {
+    const { headers, body } = splitHeadersAndBody(chunk);
+    if (/multipart\//i.test(headers)) {
+      // Вложенный multipart (например multipart/alternative внутри multipart/mixed)
+      parts.push(...extractMimeParts(headers + "\r\n\r\n" + body));
+    } else {
+      parts.push({ headers, body });
+    }
+  }
+  return parts.length ? parts : [top];
+}
+
+function decodePart(part) {
+  const cte = (part.headers.match(/Content-Transfer-Encoding:\s*([^\r\n;]+)/i) || [])[1] || "";
+  const ctype = (part.headers.match(/Content-Type:\s*([^\r\n;]+)/i) || [])[1] || "text/plain";
+  let body = part.body;
+  if (/base64/i.test(cte)) {
+    body = decodeBase64Safe(body);
+  } else if (/quoted-printable/i.test(cte)) {
+    body = decodeQuotedPrintable(body);
+  }
+  return { ctype: ctype.trim().toLowerCase(), body };
+}
+
+// Достаёт читаемый текст письма: приоритет text/plain, иначе text/html
+// с вырезанными тегами, иначе — конкатенация всего раскодированного.
+function getDecodedText(raw) {
+  const parts = extractMimeParts(raw).map(decodePart);
+
+  const plain = parts.find((p) => p.ctype.startsWith("text/plain"));
+  if (plain) return plain.body;
+
+  const html = parts.find((p) => p.ctype.startsWith("text/html"));
+  if (html) return html.body.replace(/<[^>]+>/g, " ");
+
+  return parts.map((p) => p.body).join("\n");
 }
