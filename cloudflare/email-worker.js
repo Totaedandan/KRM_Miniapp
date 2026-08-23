@@ -251,10 +251,15 @@ function decodePart(part) {
     // из-за этого пропускала декодирование целиком.
     body = decodeQuotedPrintable(body);
   }
-  // Если Content-Type не нашёлся в заголовках, но тело явно HTML — считаем
-  // его text/html по содержимому, а не молча теряем как "text/plain".
-  const ctype = ctypeHeader ? ctypeHeader.trim().toLowerCase()
-                             : (looksLikeHtml(body) ? "text/html" : "text/plain");
+  // Определяем HTML в первую очередь ПО СОДЕРЖИМОМУ, а не по заголовку —
+  // на реальных письмах OpenAI регэксп по Content-Type периодически не
+  // совпадает (та же нестандартная структура заголовков, что ломала и
+  // Content-Transfer-Encoding выше), и тогда html-часть молча уходила в
+  // ветку "просто склеить как есть" без вырезания тегов — оттуда и лезли
+  // CSS-цвета/mso-id в поиск кода. Заголовок используется только как
+  // подсказка, когда по содержимому не понятно.
+  const ctype = looksLikeHtml(body) ? "text/html"
+              : (ctypeHeader ? ctypeHeader.trim().toLowerCase() : "text/plain");
   return { ctype, body };
 }
 
