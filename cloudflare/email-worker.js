@@ -109,25 +109,39 @@ export default {
   },
 };
 
+// Один домен может обслуживать НЕСКОЛЬКО ботов (у каждого своя база
+// аккаунтов/аренд) — тогда в Variables задаётся WEBHOOK_URLS (через запятую)
+// вместо одиночного WEBHOOK_URL, и код рассылается ВСЕМ сразу. Каждый бот
+// сам решает по своей БД, принадлежит ли ему этот email (есть ли активная
+// аренда) — лишняя запись у "чужого" бота просто не используется, вреда нет.
 async function postOtp(env, recipientEmail, otpCode) {
-  if (!env.WEBHOOK_URL || !env.WEBHOOK_SECRET) {
-    console.error("WEBHOOK_URL/WEBHOOK_SECRET не заданы в Variables — см. инструкцию в шапке файла");
+  const urls = (env.WEBHOOK_URLS || env.WEBHOOK_URL || "")
+    .split(",")
+    .map((u) => u.trim())
+    .filter(Boolean);
+  if (!urls.length || !env.WEBHOOK_SECRET) {
+    console.error("WEBHOOK_URLS/WEBHOOK_URL или WEBHOOK_SECRET не заданы в Variables — см. инструкцию в шапке файла");
     return false;
   }
-  try {
-    const resp = await fetch(env.WEBHOOK_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Webhook-Secret": env.WEBHOOK_SECRET,
-      },
-      body: JSON.stringify({ recipient_email: recipientEmail, otp_code: otpCode }),
-    });
-    return resp.ok;
-  } catch (e) {
-    console.error("postOtp fetch failed:", e);
-    return false;
-  }
+  const results = await Promise.all(
+    urls.map(async (url) => {
+      try {
+        const resp = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Webhook-Secret": env.WEBHOOK_SECRET,
+          },
+          body: JSON.stringify({ recipient_email: recipientEmail, otp_code: otpCode }),
+        });
+        return resp.ok;
+      } catch (e) {
+        console.error("postOtp fetch failed for", url, e);
+        return false;
+      }
+    })
+  );
+  return results.some(Boolean); // хотя бы один бот принял — считаем успехом
 }
 
 async function streamToText(stream) {
