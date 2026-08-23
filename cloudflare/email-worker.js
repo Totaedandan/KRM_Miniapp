@@ -13,14 +13,17 @@
  *   4. Любое другое неопознанное письмо — тоже форвардим админу (безопасный
  *      дефолт: лучше лишний форвард, чем молча потерянное письмо).
  *
- * v2: письма от ChatGPT/Claude почти всегда multipart-MIME с base64 или
- * quoted-printable кодировкой HTML/текстовой части. Первая версия искала
- * 6 цифр прямо в сыром, ещё не раскодированном источнике письма — это могло
- * зацепить случайную последовательность цифр из служебных частей (Message-ID,
- * base64-блок картинки и т.п.) вместо настоящего кода. Теперь письмо сначала
- * разбирается на MIME-части, каждая раскодируется по своему
- * Content-Transfer-Encoding, и код ищется уже в реальном раскодированном
- * тексте (text/plain в приоритете, иначе text/html с вырезанными тегами).
+ * v2 (проверено на живых письмах от ChatGPT): письма от ChatGPT/Claude почти
+ * всегда multipart-MIME с base64/quoted-printable кодировкой, и заголовки
+ * Content-Type/Content-Transfer-Encoding на реальных письмах OpenAI не всегда
+ * совпадают с обычным регэкспом (нестандартное форматирование) — поэтому
+ * декодирование и определение HTML/plain текста в первую очередь опираются
+ * на СОДЕРЖИМОЕ части (похоже ли на quoted-printable / похоже ли на HTML), а
+ * заголовок используется только как подсказка. HTML-тело дополнительно
+ * чистится от <style> и MSO-условных комментариев Outlook перед поиском
+ * кода — в них попадаются похожие на код 6-значные числа (CSS-цвета вида
+ * #123456, технические id). Если чисел-кандидатов несколько — выбирается то,
+ * что стоит рядом со словом "код"/"code"/"verification" и т.п.
  *
  * ─────────────────────────────────────────────────────────────────────────
  * УСТАНОВКА (Cloudflare Dashboard):
@@ -89,21 +92,6 @@ export default {
 
     const isSensitive = SENSITIVE_KEYWORDS.some((kw) => haystackLower.includes(kw));
     const otpCode = isSensitive ? null : extractOtpCode(haystack);
-
-    // ВРЕМЕННАЯ ДИАГНОСТИКА — смотрим в Cloudflare Logs, какой текст реально
-    // распознан и какие 6-значные числа в нём вообще есть (может их несколько,
-    // и regex хватает не то). Для каждого совпадения показываем окружающий
-    // текст — так видно, какое из чисел реально «код», а какое — что-то
-    // другое (id трекинга, часть ссылки и т.п.). Убрать после того, как
-    // разберёмся окончательно.
-    const matchesWithContext = [...haystack.matchAll(/\b\d{6}\b/g)].map((m) => {
-      const start = Math.max(0, m.index - 60);
-      return haystack.slice(start, m.index + 66).replace(/\s+/g, " ").trim();
-    });
-    console.log("DEBUG subject:", subject);
-    console.log("DEBUG decoded body (first 1500 chars):", decodedBody.slice(0, 1500));
-    console.log("DEBUG 6-digit matches with context:", matchesWithContext);
-    console.log("DEBUG chosen code:", otpCode, "isSensitive:", isSensitive);
 
     if (otpCode) {
       const ok = await postOtp(env, to, otpCode);
