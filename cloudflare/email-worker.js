@@ -72,10 +72,17 @@ export default {
 
     // ВРЕМЕННАЯ ДИАГНОСТИКА — смотрим в Cloudflare Logs, какой текст реально
     // распознан и какие 6-значные числа в нём вообще есть (может их несколько,
-    // и regex хватает не то). Убрать после того, как разберёмся.
+    // и regex хватает не то). Для каждого совпадения показываем окружающий
+    // текст — так видно, какое из чисел реально «код», а какое — что-то
+    // другое (id трекинга, часть ссылки и т.п.). Убрать после того, как
+    // разберёмся окончательно.
+    const matchesWithContext = [...haystack.matchAll(/\b\d{6}\b/g)].map((m) => {
+      const start = Math.max(0, m.index - 60);
+      return haystack.slice(start, m.index + 66).replace(/\s+/g, " ").trim();
+    });
     console.log("DEBUG subject:", subject);
-    console.log("DEBUG decoded body (first 800 chars):", decodedBody.slice(0, 800));
-    console.log("DEBUG all 6-digit matches:", haystack.match(/\b\d{6}\b/g));
+    console.log("DEBUG decoded body (first 1500 chars):", decodedBody.slice(0, 1500));
+    console.log("DEBUG 6-digit matches with context:", matchesWithContext);
     console.log("DEBUG chosen match:", otpMatch ? otpMatch[1] : null, "isSensitive:", isSensitive);
 
     if (otpMatch) {
@@ -137,10 +144,21 @@ async function streamToText(stream) {
 // ── Минимальный MIME-парсер (без внешних библиотек) ───────────────────────
 
 function decodeQuotedPrintable(str) {
-  return str
-    .replace(/=\r\n/g, "")
-    .replace(/=\n/g, "")
-    .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+  const cleaned = str.replace(/=\r\n/g, "").replace(/=\n/g, "");
+  // Собираем настоящие байты (не char-per-char), чтобы многобайтовые UTF-8
+  // последовательности (кириллица и т.п.) декодировались правильно, а не
+  // превращались в "ÐÐ°Ñ" — для поиска цифр это не критично (ASCII цифры не
+  // экранируются), но делает контекст читаемым при разборе логов.
+  const bytes = [];
+  for (let i = 0; i < cleaned.length; i++) {
+    if (cleaned[i] === "=" && /^[0-9A-Fa-f]{2}$/.test(cleaned.slice(i + 1, i + 3))) {
+      bytes.push(parseInt(cleaned.slice(i + 1, i + 3), 16));
+      i += 2;
+    } else {
+      bytes.push(cleaned.charCodeAt(i) & 0xff);
+    }
+  }
+  return new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(bytes));
 }
 
 function decodeBase64Safe(str) {
@@ -183,16 +201,36 @@ function extractMimeParts(raw) {
   return parts.length ? parts : [top];
 }
 
+// Эвристика: похоже ли содержимое на ещё не раскодированный quoted-printable
+// (много "=XX" последовательностей или мягкие переносы "=\r\n"/"=\n"). Нужна
+// как страховка на случай, если Content-Transfer-Encoding не нашёлся в
+// заголовках части из-за нестандартной структуры письма реального сервиса —
+// так и оказалось на живом письме от OpenAI, регэксп по заголовкам ничего не
+// нашёл, и письмо осталось нераскодированным.
+function looksQuotedPrintable(body) {
+  const softBreaks = (body.match(/=\r?\n/g) || []).length;
+  const hexEscapes = (body.match(/=[0-9A-Fa-f]{2}/g) || []).length;
+  return softBreaks > 0 || hexEscapes > 5;
+}
+
+function looksLikeHtml(body) {
+  return /<html[\s>]/i.test(body) || /<\/?(p|div|span|br|table|tr|td|title|head|body)[\s>]/i.test(body);
+}
+
 function decodePart(part) {
   const cte = (part.headers.match(/Content-Transfer-Encoding:\s*([^\r\n;]+)/i) || [])[1] || "";
-  const ctype = (part.headers.match(/Content-Type:\s*([^\r\n;]+)/i) || [])[1] || "text/plain";
+  const ctypeHeader = (part.headers.match(/Content-Type:\s*([^\r\n;]+)/i) || [])[1] || "";
   let body = part.body;
   if (/base64/i.test(cte)) {
     body = decodeBase64Safe(body);
-  } else if (/quoted-printable/i.test(cte)) {
+  } else if (/quoted-printable/i.test(cte) || (!cte && looksQuotedPrintable(body))) {
     body = decodeQuotedPrintable(body);
   }
-  return { ctype: ctype.trim().toLowerCase(), body };
+  // Если Content-Type не нашёлся в заголовках, но тело явно HTML — считаем
+  // его text/html по содержимому, а не молча теряем как "text/plain".
+  const ctype = ctypeHeader ? ctypeHeader.trim().toLowerCase()
+                             : (looksLikeHtml(body) ? "text/html" : "text/plain");
+  return { ctype, body };
 }
 
 // Достаёт читаемый текст письма: приоритет text/plain, иначе text/html
