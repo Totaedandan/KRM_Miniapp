@@ -560,7 +560,7 @@ function TurnitinScreen({ user, prices, premiumMult, onNav, onBalanceUpdate }) {
         <button onClick={()=>setPremium(true)}
           style={{flex:1,padding:'14px 12px',borderRadius:'var(--r-lg)',border:`1px solid ${premium?'var(--accent-bd)':'var(--card-b)'}`,background:premium?'var(--accent-soft)':'transparent',color:'var(--txt)',cursor:'pointer',textAlign:'left',transition:'background-color .15s ease, border-color .15s ease'}}>
           <div style={{fontWeight:700,fontSize:14,display:'flex',alignItems:'center',gap:7}}><Icon name="zap" size={15} color={premium?'var(--accent-2)':'var(--txt2)'}/> Премиум ×{mult}</div>
-          <div style={{fontSize:11,color:'var(--txt2)',marginTop:4}}>без ожидания, приоритет</div>
+          <div style={{fontSize:11,color:'var(--txt2)',marginTop:4}}>приоритетное обслуживание</div>
         </button>
       </div>
 
