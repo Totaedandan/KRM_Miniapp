@@ -33,6 +33,7 @@ from datetime import datetime, timedelta
 from database import db
 from bot_sender import send_message
 from services import ai_rental_service
+from services.ai_rental_service import LOGOUT_GRACE_SEC
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,7 @@ class AiRentalManager:
                 f"Спасибо, что пользуетесь сервисом!\n"
                 f"Арендовать снова можно в приложении.",
             )
-            asyncio.create_task(self.logout_account(r["account_id"]))
+            asyncio.create_task(self._delayed_logout(r["account_id"]))
 
         # 3. Cooldown → available
         cooldown_threshold = (now - timedelta(minutes=COOLDOWN_MIN)).isoformat()
@@ -108,6 +109,13 @@ class AiRentalManager:
             await db.update_ai_account_status(acc["id"], "available")
             logger.info("ai_account #%s cooldown → available", acc["id"])
             await self.notify_waitlist(acc["service_id"])
+
+    async def _delayed_logout(self, account_id: int):
+        """Пауза перед логаутом истёкшей аренды — снижает шанс столкнуться с
+        арендатором, который в этот же момент ещё запрашивает код. Ручной
+        force_logout/отмена админом идут напрямую в logout_account(), без паузы."""
+        await asyncio.sleep(LOGOUT_GRACE_SEC)
+        await self.logout_account(account_id)
 
     async def logout_account(self, account_id: int):
         """Запускает авто-разлогин с учётом очереди на прокси аккаунта, затем
