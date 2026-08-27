@@ -16,7 +16,13 @@
   • Не успел отправить файл за 3 минуты → возврат денег + потеря места.
   • Везде показывается число людей в очереди и ETA (1 файл = 7 минут).
 
-Воркер обрабатывает по одному заказу за раз (Turnitin сериализован).
+Воркер держит два "слота" обработки: основной (общий персистентный браузер
+turnitin_service, им пользуются обе очереди, когда он свободен) и overflow
+(временный отдельный TurnitinService() — поднимается ТОЛЬКО если премиум
+пришёл, пока основной уже занят обычным заказом, чтобы премиум не ждал за
+обычным; закрывается сразу после того заказа). Так основную часть времени
+работает один браузер (экономия RAM), а второй появляется лишь при реальном
+пересечении очередей. Одновременно overflow-слот только один.
 """
 
 from __future__ import annotations
@@ -59,6 +65,9 @@ class TurnitinQueueManager:
         self._worker_task: Optional[asyncio.Task] = None
         self.bot = None
         self.settings = None
+        # id заказа, занимающего основной/overflow слот прямо сейчас (или None)
+        self._main_busy_order: Optional[int] = None
+        self._overflow_busy_order: Optional[int] = None
 
     # ── Запуск ────────────────────────────────────────────────────────────────
 
@@ -252,34 +261,54 @@ class TurnitinQueueManager:
         await self._reevaluate()
 
     # ── Воркер обработки ────────────────────────────────────────────────────────
+    #
+    # Два "слота": основной (общий персистентный браузер turnitin_service —
+    # использует и премиум, и обычная очередь, когда браузер свободен) и
+    # overflow (временный отдельный TurnitinService(), поднимается только
+    # когда премиум-заказ пришёл, а основной уже занят обычным — премиум не
+    # должен ждать за обычным). Не блокирующий: сами заказы выполняются как
+    # фоновые задачи (create_task), а диспетчер в цикле проверяет БД и раздаёт
+    # слоты — так он не "зависает" внутри await на время обработки одного
+    # заказа и успевает заметить премиум, пришедший, пока обычный ещё крутится.
+    #
+    # Одновременно overflow-слот только один — если премиум-заказов пришло
+    # больше, чем свободных слотов, лишние просто ждут своей очереди как раньше.
 
     async def _worker(self):
         from database import db as database
         logger.info("TurnitinQueue: worker loop started")
         while True:
-            # Выбрать следующий готовый заказ (премиум раньше обычных)
+            dispatched = False
             async with self._lock:
                 active = await database.get_active_orders()
-                job = next((o for o in active if o["status"] == "ready"), None)
-                if job:
-                    await database.update_order(job["id"], status="processing")
+                for job in (o for o in active if o["status"] == "ready"):
+                    is_premium = bool(job.get("is_premium"))
+                    if self._main_busy_order is None:
+                        self._main_busy_order = job["id"]
+                        await database.update_order(job["id"], status="processing")
+                        asyncio.create_task(self._run_turnitin(job, overflow=False))
+                        dispatched = True
+                        break
+                    if is_premium and self._overflow_busy_order is None:
+                        self._overflow_busy_order = job["id"]
+                        await database.update_order(job["id"], status="processing")
+                        logger.info("Order %s: премиум мимо очереди — отдельный overflow-браузер "
+                                    "(основной занят заказом #%s)", job["id"], self._main_busy_order)
+                        asyncio.create_task(self._run_turnitin(job, overflow=True))
+                        dispatched = True
+                        break
 
-            if not job:
+            if not dispatched:
                 self._wakeup.clear()
                 await self._wakeup.wait()
-                continue
 
-            try:
-                await self._run_turnitin(job)
-            except Exception as e:
-                logger.error("Worker unhandled error order %s: %s", job["id"], e)
-            finally:
-                await self._reevaluate()
-
-    async def _run_turnitin(self, order: dict):
-        from services.turnitin_service import turnitin_service
+    async def _run_turnitin(self, order: dict, overflow: bool = False):
+        from services.turnitin_service import turnitin_service, TurnitinService
         from database import db as database
         from aiogram.types import FSInputFile
+
+        overflow_service = TurnitinService() if overflow else None
+        service = overflow_service or turnitin_service
 
         order_id    = order["id"]
         tg_id       = order["user_id"]
@@ -308,7 +337,7 @@ class TurnitinQueueManager:
             )
 
             sim_path, ai_path = await asyncio.wait_for(
-                turnitin_service.process(
+                service.process(
                     order_id=order_id,
                     file_path=file_path,
                     file_name=os.path.basename(file_path),
@@ -365,6 +394,19 @@ class TurnitinQueueManager:
                 f"😔 <b>Не удалось получить отчёт.</b>\n"
                 f"Свяжитесь с нами: {support}\nНомер заказа: <b>#{order_id}</b>",
             )
+        finally:
+            if overflow_service is not None:
+                # Временный overflow-браузер — закрываем сразу, он больше не нужен
+                # (основной turnitin_service остаётся жить между заказами как обычно).
+                try:
+                    await overflow_service.cleanup()
+                except Exception as e:
+                    logger.warning("overflow browser cleanup error (order %s): %s", order_id, e)
+                self._overflow_busy_order = None
+            else:
+                self._main_busy_order = None
+            self._wakeup.set()
+            await self._reevaluate()
 
     # ── Вспомогательное ─────────────────────────────────────────────────────────
 
