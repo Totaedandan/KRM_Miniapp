@@ -32,6 +32,13 @@ logger = logging.getLogger(__name__)
 FILE_TIMEOUT_SEC = 180     # 3 минуты на отправку файла
 MINUTES_PER_FILE = 7       # оценка времени обработки одного файла
 MAX_PROCESS_RETRIES = 3    # макс. авто-повторов обработки (после сбоев/перезапусков)
+# Жёсткий потолок на весь process() (включая внутренние ретраи и 30-минутное
+# ожидание отчёта) — без него зависший без исключения await (например,
+# frame.evaluate() на отсоединившемся LTI-фрейме — нет своего таймаута) вешает
+# воркер НАВСЕГДА: _worker() обрабатывает заказы строго по одному, так что один
+# зависший заказ блокирует и обычную, и премиум очередь целиком, независимо от
+# того, что у них разные class_id/assignment_id в Turnitin.
+PROCESS_TIMEOUT_SEC = 3600  # 60 минут — с запасом даже на полный цикл ретраев
 
 
 @dataclass
@@ -300,16 +307,19 @@ class TurnitinQueueManager:
                 "Отчёт придёт через 5–30 минут ⏱"
             )
 
-            sim_path, ai_path = await turnitin_service.process(
-                order_id=order_id,
-                file_path=file_path,
-                file_name=os.path.basename(file_path),
-                report_type=report_type,
-                email=email,
-                password=password,
-                class_id=class_id,
-                assign_id=assign_id,
-                reports_dir=s.REPORTS_DIR,
+            sim_path, ai_path = await asyncio.wait_for(
+                turnitin_service.process(
+                    order_id=order_id,
+                    file_path=file_path,
+                    file_name=os.path.basename(file_path),
+                    report_type=report_type,
+                    email=email,
+                    password=password,
+                    class_id=class_id,
+                    assign_id=assign_id,
+                    reports_dir=s.REPORTS_DIR,
+                ),
+                timeout=PROCESS_TIMEOUT_SEC,
             )
 
             await database.update_order(
@@ -333,6 +343,20 @@ class TurnitinQueueManager:
             except Exception:
                 pass
 
+        except asyncio.TimeoutError:
+            # asyncio.wait_for отменил задачу — сама TimeoutError() приходит без
+            # текста, поэтому формируем сообщение явно, иначе error_text пустой.
+            logger.error("Turnitin processing timed out for order %s after %ds",
+                         order_id, PROCESS_TIMEOUT_SEC)
+            await database.update_order(
+                order_id, status="error",
+                error_text=f"Обработка зависла (>{PROCESS_TIMEOUT_SEC // 60} мин) и была прервана",
+            )
+            support = await database.get_setting("help_username") or "@support"
+            await self._send(tg_id,
+                f"😔 <b>Не удалось получить отчёт.</b>\n"
+                f"Свяжитесь с нами: {support}\nНомер заказа: <b>#{order_id}</b>",
+            )
         except Exception as e:
             logger.error("Turnitin error order %s: %s", order_id, e, exc_info=True)
             await database.update_order(order_id, status="error", error_text=str(e)[:500])
