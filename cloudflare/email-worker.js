@@ -99,6 +99,18 @@ export default {
       // Вебхук не ответил ok — не теряем письмо молча, форвардим админу
     }
 
+    // ВРЕМЕННАЯ ДИАГНОСТИКА — если код в тексте письма не нашёлся (Claude
+    // шлёт magic-link, а не голый код), смотрим в Cloudflare Logs, какие
+    // ссылки вообще есть в письме — чтобы понять, по какой из них переходить
+    // за кодом. Убрать после того, как разберёмся с точным паттерном ссылки.
+    if (!isSensitive && !otpCode) {
+      const rawHtml = getDecodedHtml(rawText);
+      const links = [...rawHtml.matchAll(/href="([^"]+)"/gi)].map((m) => m[1]);
+      console.log("DEBUG no code found, subject:", subject);
+      console.log("DEBUG links found in email:", links);
+      console.log("DEBUG decoded html (first 2000 chars):", rawHtml.slice(0, 2000));
+    }
+
     if (env.ADMIN_EMAIL) {
       try {
         await message.forward(env.ADMIN_EMAIL);
@@ -275,6 +287,19 @@ function stripNonContent(html) {
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
     .replace(/<!--\[if[\s\S]*?<!\[endif\]-->/gi, " ")
     .replace(/<!--[\s\S]*?-->/g, " ");
+}
+
+// То же самое, что getDecodedText, но БЕЗ вырезания тегов — нужно, когда
+// в письме нет прямого кода, а есть только ссылка (magic link), как у
+// Claude: письмо содержит кнопку "Sign in", а код показывается только на
+// странице, куда она ведёт (при переходе с "чужого" устройства/сессии —
+// ровно наш случай, письмо открывает Worker, а не сам пользователь).
+function getDecodedHtml(raw) {
+  const parts = extractMimeParts(raw).map(decodePart);
+  const html = parts.find((p) => p.ctype.startsWith("text/html"));
+  if (html) return stripNonContent(html.body);
+  const plain = parts.find((p) => p.ctype.startsWith("text/plain"));
+  return plain ? plain.body : parts.map((p) => p.body).join("\n");
 }
 
 // Достаёт читаемый текст письма: приоритет text/plain, иначе text/html
