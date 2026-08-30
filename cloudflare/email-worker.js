@@ -91,24 +91,28 @@ export default {
     const haystackLower = haystack.toLowerCase();
 
     const isSensitive = SENSITIVE_KEYWORDS.some((kw) => haystackLower.includes(kw));
-    const otpCode = isSensitive ? null : extractOtpCode(haystack);
+    let otpCode = isSensitive ? null : extractOtpCode(haystack);
+
+    // Claude шлёт не голый код, а magic-link — письмо содержит только кнопку
+    // "Sign in". Код появляется лишь на странице, куда ведёт ссылка, и только
+    // если её открывают НЕ из той же сессии/браузера, что запрашивал вход
+    // (см. текст на форме логина Claude: "If the link shows a verification
+    // code instead of signing you in, enter it here") — у Worker'а нет cookies
+    // арендатора, так что для Claude это всегда "чужая" сессия, и он покажет
+    // код вместо автовхода. Прямая ссылка вида claude.ai/magic-link#... (не
+    // через click-tracking редирект) работает надёжнее и быстрее.
+    if (!otpCode && !isSensitive) {
+      const rawHtml = getDecodedHtml(rawText);
+      const magicLink = findMagicLink(rawHtml);
+      if (magicLink) {
+        otpCode = await fetchCodeFromMagicLink(magicLink);
+      }
+    }
 
     if (otpCode) {
       const ok = await postOtp(env, to, otpCode);
       if (ok) return; // успешно передали в бэкенд — форвардить не нужно
       // Вебхук не ответил ok — не теряем письмо молча, форвардим админу
-    }
-
-    // ВРЕМЕННАЯ ДИАГНОСТИКА — если код в тексте письма не нашёлся (Claude
-    // шлёт magic-link, а не голый код), смотрим в Cloudflare Logs, какие
-    // ссылки вообще есть в письме — чтобы понять, по какой из них переходить
-    // за кодом. Убрать после того, как разберёмся с точным паттерном ссылки.
-    if (!isSensitive && !otpCode) {
-      const rawHtml = getDecodedHtml(rawText);
-      const links = [...rawHtml.matchAll(/href="([^"]+)"/gi)].map((m) => m[1]);
-      console.log("DEBUG no code found, subject:", subject);
-      console.log("DEBUG links found in email:", links);
-      console.log("DEBUG decoded html (first 2000 chars):", rawHtml.slice(0, 2000));
     }
 
     if (env.ADMIN_EMAIL) {
@@ -120,6 +124,37 @@ export default {
     }
   },
 };
+
+// Ищем прямую ссылку на magic-link (не через click-tracking редирект вида
+// url*.mail.anthropic.com/ls/click?...) — она обычно тоже есть в письме как
+// запасной "если кнопка не работает, скопируйте эту ссылку" вариант, и вести
+// себя должна идентично, но без лишнего перехода через редирект-сервис.
+function findMagicLink(html) {
+  const links = [...html.matchAll(/href="([^"]+)"/gi)].map((m) => m[1]);
+  const direct = links.find((l) => /\/magic-link/i.test(l));
+  if (direct) return direct;
+  return links.find((l) => /claude\.ai|anthropic\.com/i.test(l)) || null;
+}
+
+// Переходим по magic-link без cookies (для Claude это выглядит как чужая
+// сессия) — вместо автовхода получаем страницу с кодом, ищем его тем же
+// способом, что и в письме (несколько кандидатов — предпочитаем тот, что
+// рядом со словом-подсказкой).
+async function fetchCodeFromMagicLink(url) {
+  try {
+    const resp = await fetch(url, { redirect: "follow" });
+    if (!resp.ok) {
+      console.error("magic-link fetch failed, status:", resp.status, url);
+      return null;
+    }
+    const html = await resp.text();
+    const text = stripNonContent(html).replace(/<[^>]+>/g, " ");
+    return extractOtpCode(text);
+  } catch (e) {
+    console.error("magic-link fetch error:", e, url);
+    return null;
+  }
+}
 
 // Один домен может обслуживать НЕСКОЛЬКО ботов (у каждого своя база
 // аккаунтов/аренд) — тогда в Variables задаётся WEBHOOK_URLS (через запятую)
