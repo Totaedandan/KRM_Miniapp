@@ -25,6 +25,17 @@
  * #123456, технические id). Если чисел-кандидатов несколько — выбирается то,
  * что стоит рядом со словом "код"/"code"/"verification" и т.п.
  *
+ * v3: некоторые сервисы (Claude) не кладут код прямо в письмо — только
+ * ссылку "Sign in" (magic-link). Сам код рисуется JS-ом только на странице,
+ * куда она ведёт, и только если её открывают не из той сессии, что
+ * запрашивала вход — ровно наш случай. Worker НЕ пытается сам сходить по
+ * такой ссылке (fetch() не видит #фрагмент с токеном — он не уходит на
+ * сервер ни в одном HTTP-запросе, и код всё равно рисуется JS-ом уже после
+ * загрузки, так что голый fetch() получил бы пустой каркас страницы и 403
+ * на реальном тесте) — вместо этого просто пересылает саму ссылку на
+ * /api/email-hook как {recipient_email, magic_link}, а бэкенд открывает её в
+ * настоящем Playwright-браузере (см. services/ai_rental_service.py).
+ *
  * ─────────────────────────────────────────────────────────────────────────
  * УСТАНОВКА (Cloudflare Dashboard):
  *
@@ -91,28 +102,24 @@ export default {
     const haystackLower = haystack.toLowerCase();
 
     const isSensitive = SENSITIVE_KEYWORDS.some((kw) => haystackLower.includes(kw));
-    let otpCode = isSensitive ? null : extractOtpCode(haystack);
+    const otpCode = isSensitive ? null : extractOtpCode(haystack);
 
     // Claude шлёт не голый код, а magic-link — письмо содержит только кнопку
-    // "Sign in". Код появляется лишь на странице, куда ведёт ссылка, и только
-    // если её открывают НЕ из той же сессии/браузера, что запрашивал вход
-    // (см. текст на форме логина Claude: "If the link shows a verification
-    // code instead of signing you in, enter it here") — у Worker'а нет cookies
-    // арендатора, так что для Claude это всегда "чужая" сессия, и он покажет
-    // код вместо автовхода. Прямая ссылка вида claude.ai/magic-link#... (не
-    // через click-tracking редирект) работает надёжнее и быстрее.
-    if (!otpCode && !isSensitive) {
-      const rawHtml = getDecodedHtml(rawText);
-      const magicLink = findMagicLink(rawHtml);
-      if (magicLink) {
-        otpCode = await fetchCodeFromMagicLink(magicLink);
-      }
-    }
+    // "Sign in". Ссылка с #фрагментом (токен после # — не долетает до сервера
+    // ни в каком fetch(), это чисто клиентский механизм) и сам код рисуется
+    // JS-ом страницы уже ПОСЛЕ загрузки — обычный fetch() из Worker'а получает
+    // пустой каркас страницы без токена и без кода (пробовали — 403 и пусто).
+    // Поэтому здесь ссылку не трогаем, а просто пересылаем как есть в бэкенд —
+    // там уже настоящий Playwright-браузer её откроет и вытащит код из DOM.
+    const magicLink = (!otpCode && !isSensitive) ? findMagicLink(getDecodedHtml(rawText)) : null;
 
     if (otpCode) {
-      const ok = await postOtp(env, to, otpCode);
+      const ok = await postToWebhooks(env, { recipient_email: to, otp_code: otpCode });
       if (ok) return; // успешно передали в бэкенд — форвардить не нужно
       // Вебхук не ответил ok — не теряем письмо молча, форвардим админу
+    } else if (magicLink) {
+      const ok = await postToWebhooks(env, { recipient_email: to, magic_link: magicLink });
+      if (ok) return;
     }
 
     if (env.ADMIN_EMAIL) {
@@ -136,32 +143,14 @@ function findMagicLink(html) {
   return links.find((l) => /claude\.ai|anthropic\.com/i.test(l)) || null;
 }
 
-// Переходим по magic-link без cookies (для Claude это выглядит как чужая
-// сессия) — вместо автовхода получаем страницу с кодом, ищем его тем же
-// способом, что и в письме (несколько кандидатов — предпочитаем тот, что
-// рядом со словом-подсказкой).
-async function fetchCodeFromMagicLink(url) {
-  try {
-    const resp = await fetch(url, { redirect: "follow" });
-    if (!resp.ok) {
-      console.error("magic-link fetch failed, status:", resp.status, url);
-      return null;
-    }
-    const html = await resp.text();
-    const text = stripNonContent(html).replace(/<[^>]+>/g, " ");
-    return extractOtpCode(text);
-  } catch (e) {
-    console.error("magic-link fetch error:", e, url);
-    return null;
-  }
-}
-
 // Один домен может обслуживать НЕСКОЛЬКО ботов (у каждого своя база
 // аккаунтов/аренд) — тогда в Variables задаётся WEBHOOK_URLS (через запятую)
-// вместо одиночного WEBHOOK_URL, и код рассылается ВСЕМ сразу. Каждый бот
+// вместо одиночного WEBHOOK_URL, и payload рассылается ВСЕМ сразу. Каждый бот
 // сам решает по своей БД, принадлежит ли ему этот email (есть ли активная
 // аренда) — лишняя запись у "чужого" бота просто не используется, вреда нет.
-async function postOtp(env, recipientEmail, otpCode) {
+// payload — {recipient_email, otp_code} ИЛИ {recipient_email, magic_link},
+// бэкенд сам разбирается, что из этого пришло (см. /api/email-hook).
+async function postToWebhooks(env, payload) {
   const urls = (env.WEBHOOK_URLS || env.WEBHOOK_URL || "")
     .split(",")
     .map((u) => u.trim())
@@ -179,11 +168,11 @@ async function postOtp(env, recipientEmail, otpCode) {
             "Content-Type": "application/json",
             "X-Webhook-Secret": env.WEBHOOK_SECRET,
           },
-          body: JSON.stringify({ recipient_email: recipientEmail, otp_code: otpCode }),
+          body: JSON.stringify(payload),
         });
         return resp.ok;
       } catch (e) {
-        console.error("postOtp fetch failed for", url, e);
+        console.error("postToWebhooks fetch failed for", url, e);
         return false;
       }
     })
