@@ -2303,6 +2303,16 @@ async def get_ai_account(account_id: int) -> Optional[dict]:
         return dict(row) if row else None
 
 
+async def get_ai_account_by_email(email: str) -> Optional[dict]:
+    """Для резолва magic-link писем (Claude и т.п.) — там письмо приходит на
+    email аккаунта, но нет order_id/account_id, только сам адрес."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM ai_accounts WHERE email=?", (email,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
 async def update_ai_account_status(account_id: int, status: str) -> bool:
     async with aiosqlite.connect(_DB_PATH) as db:
         cur = await db.execute(

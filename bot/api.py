@@ -882,24 +882,41 @@ async def rental_otp(email: str, x_telegram_init_data: str = Header(None)):
 
 class EmailHookBody(BaseModel):
     recipient_email: str
-    otp_code:        str
+    otp_code:        Optional[str] = None
+    magic_link:      Optional[str] = None
 
 
 @app.post("/api/email-hook")
 async def email_hook(body: EmailHookBody, x_webhook_secret: str = Header(None)):
-    """Приём OTP-кода от Cloudflare Worker (Email Routing → пересылка на этот
-    эндпоинт). Публичный (без Telegram initData) эндпоинт — защищён отдельным
-    заголовком-секретом, сверяемым constant-time."""
+    """Приём кода/ссылки от Cloudflare Worker (Email Routing → пересылка на
+    этот эндпоинт). Публичный (без Telegram initData) эндпоинт — защищён
+    отдельным заголовком-секретом, сверяемым constant-time.
+
+    Обычно приходит otp_code (код прямо в письме). Некоторые сервисы (Claude)
+    шлют только magic-link — код появляется лишь на странице, куда она ведёт,
+    и рендерится их собственным JS, так что нужен реальный браузер: запускаем
+    resolve_magic_link_otp в фоне (не блокируем ответ вебхуку) и возвращаемся
+    сразу — результат сам появится в otp_incoming_codes через 5-20 секунд."""
     if not settings.EMAIL_WEBHOOK_SECRET or not x_webhook_secret or \
        not hmac.compare_digest(x_webhook_secret, settings.EMAIL_WEBHOOK_SECRET):
         raise HTTPException(401, "Invalid webhook secret")
-    code = re.sub(r"\D", "", body.otp_code)[:8]
-    if not code:
-        raise HTTPException(400, "otp_code пустой")
     email = body.recipient_email.strip().lower()
-    await database.insert_otp_code(email, code)
-    logger.info(f"email-hook: OTP received for {email}")
-    return {"ok": True}
+
+    if body.otp_code:
+        code = re.sub(r"\D", "", body.otp_code)[:8]
+        if not code:
+            raise HTTPException(400, "otp_code пустой")
+        await database.insert_otp_code(email, code)
+        logger.info(f"email-hook: OTP received for {email}")
+        return {"ok": True}
+
+    if body.magic_link:
+        from services.ai_rental_service import resolve_magic_link_otp
+        logger.info(f"email-hook: magic link received for {email}, resolving via browser")
+        asyncio.create_task(resolve_magic_link_otp(email, body.magic_link))
+        return {"ok": True, "queued": True}
+
+    raise HTTPException(400, "otp_code или magic_link обязателен")
 
 
 # -- Аренда: админ --------------------------------------------------------------
