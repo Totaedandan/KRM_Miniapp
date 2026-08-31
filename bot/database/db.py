@@ -1214,11 +1214,32 @@ async def get_stats() -> dict:
         )
         by_type_done = {r[0]: r[1] for r in await cur.fetchall()}
 
+        # Легаси-путь: прямая оплата Kaspi-чеком в самом боте (payments.purpose='turnitin').
         cur = await db.execute(
             "SELECT payment_type, COUNT(*), SUM(amount_tenge) FROM payments "
             "WHERE status='confirmed' AND purpose='turnitin' GROUP BY payment_type"
         )
-        turnitin_revenue = {r[0]: {"count": r[1], "tenge": r[2] or 0} for r in await cur.fetchall()}
+        turnitin_revenue = {
+            f"{r[0]} (чек в боте)": {"count": r[1], "tenge": r[2] or 0}
+            for r in await cur.fetchall()
+        }
+
+        # Основной путь сейчас — списание с баланса через ledger (create_paid_order /
+        # webapp._start_turnitin), эти заказы в payments вообще не попадают. Берём
+        # чистую сумму (списание минус возврат по отменённым заказам) из transactions,
+        # отдельно по валюте списания (тенге / бонус).
+        cur = await db.execute(
+            "SELECT currency, "
+            "SUM(CASE WHEN type='debit'  AND reason='order_charge' THEN amount ELSE 0 END) "
+            "- SUM(CASE WHEN type='credit' AND reason='order_refund' THEN amount ELSE 0 END) AS net, "
+            "COUNT(DISTINCT CASE WHEN type='debit' AND reason='order_charge' THEN order_id END) AS cnt "
+            "FROM transactions WHERE reason IN ('order_charge','order_refund') GROUP BY currency"
+        )
+        currency_label = {"tenge": "с баланса (₸)", "bonus": "с баланса (бонус)"}
+        for currency, net, cnt in await cur.fetchall():
+            turnitin_revenue[currency_label.get(currency, currency)] = {
+                "count": cnt or 0, "tenge": net or 0,
+            }
 
         cur = await db.execute(
             "SELECT payment_type, COUNT(*), SUM(tokens_amount) FROM payments "
