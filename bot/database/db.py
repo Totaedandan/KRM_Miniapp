@@ -236,25 +236,11 @@ async def init_db(path: str):
                 created_at       TEXT    NOT NULL
             );
 
-            -- Magic-link сервисы (Claude) шлют не код, а ссылку — код рисуется их
-            -- собственным JS на странице, куда она ведёт, и наш серверный браузер
-            -- регулярно словит на этой странице Cloudflare Turnstile (см. историю
-            -- resolve_magic_link_otp в git). Вместо попытки решить капчу за юзера —
-            -- отдаём ему саму ссылку, он открывает её В СВОЁМ браузере (реальный IP,
-            -- никакого риск-скоринга) и либо сразу логинится, либо видит код сам.
-            CREATE TABLE IF NOT EXISTS otp_incoming_links (
-                id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                recipient_email  TEXT    NOT NULL,
-                magic_link       TEXT    NOT NULL,
-                created_at       TEXT    NOT NULL
-            );
-
             CREATE INDEX IF NOT EXISTS idx_ai_accounts_svc   ON ai_accounts(service_id, status);
             CREATE INDEX IF NOT EXISTS idx_ai_accounts_proxy ON ai_accounts(proxy_id);
             CREATE INDEX IF NOT EXISTS idx_ai_rentals_user   ON ai_rentals(user_id);
             CREATE INDEX IF NOT EXISTS idx_ai_rentals_exp    ON ai_rentals(status, expires_at);
             CREATE INDEX IF NOT EXISTS idx_otp_email         ON otp_incoming_codes(recipient_email, created_at);
-            CREATE INDEX IF NOT EXISTS idx_otp_links_email   ON otp_incoming_links(recipient_email, created_at);
 
             CREATE TABLE IF NOT EXISTS banned_usernames (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2765,34 +2751,6 @@ async def get_otp_logs(limit: int = 100) -> list[dict]:
             "SELECT * FROM otp_incoming_codes ORDER BY created_at DESC LIMIT ?", (limit,)
         )
         return [dict(r) for r in await cur.fetchall()]
-
-
-# ── Magic-link (Claude и т.п.) — отдаём ссылку юзеру вместо решения капчи ─
-
-MAGIC_LINK_TTL_SEC = 900  # оценка (Claude не документирует точный TTL) — 15 минут
-
-
-async def insert_magic_link(email: str, link: str):
-    async with aiosqlite.connect(_DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO otp_incoming_links(recipient_email,magic_link,created_at) VALUES(?,?,?)",
-            (email, link, _now()),
-        )
-        await db.commit()
-
-
-async def get_recent_magic_link(email: str, window_sec: int = MAGIC_LINK_TTL_SEC) -> Optional[dict]:
-    from datetime import timedelta
-    threshold = (datetime.utcnow() - timedelta(seconds=window_sec)).isoformat()
-    async with aiosqlite.connect(_DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        cur = await db.execute(
-            "SELECT magic_link, created_at FROM otp_incoming_links "
-            "WHERE recipient_email=? AND created_at>=? ORDER BY created_at DESC LIMIT 1",
-            (email, threshold),
-        )
-        row = await cur.fetchone()
-        return dict(row) if row else None
 
 
 # ── Прокси/cooldown — используются воркером ai_rental_manager ────────

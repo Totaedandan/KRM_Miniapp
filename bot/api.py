@@ -57,7 +57,6 @@ import logging
 import os
 import re
 import sys
-from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -903,34 +902,22 @@ async def rental_notify(body: RentalNotifyBody, x_telegram_init_data: str = Head
 
 @app.get("/api/rental/otp")
 async def rental_otp(email: str, x_telegram_init_data: str = Header(None)):
-    """Юзер жмёт «Получить код»: отдаём последний код/ссылку входа, пришедшую
-    на email его активной аренды (владение проверяется — иначе можно
-    подсмотреть чужой код). Большинство сервисов шлют код прямо в письме
-    (kind=code). Claude шлёт только magic-link (kind=link) — фронт показывает
-    саму ссылку, юзер открывает её в своём браузере."""
+    """Юзер жмёт «Получить код»: отдаём последний код/ссылку, пришедшую на
+    email его активной аренды (владение проверяется — иначе можно
+    подсмотреть чужой код). Claude вместо кода шлёт magic-link — фронт
+    (OtpButton) сам отличает его по префиксу http(s) и рисует
+    Открыть/Копировать вместо голого кода."""
     user = await _get_user(x_telegram_init_data)
     email = email.strip().lower()
     rental = await database.get_active_ai_rental_by_email(user["tg_id"], email)
     if not rental:
         raise HTTPException(403, "Этот email не привязан к вашей активной аренде")
-
-    code = await database.get_recent_otp(email)
-    if code:
-        return {"ok": True, "kind": "code", "code": code}
-
-    link_row = await database.get_recent_magic_link(email)
-    if link_row:
-        expires_at = (
-            datetime.fromisoformat(link_row["created_at"])
-            + timedelta(seconds=database.MAGIC_LINK_TTL_SEC)
-        ).isoformat()
-        return {
-            "ok": True, "kind": "link",
-            "magic_link": link_row["magic_link"],
-            "expires_at": expires_at,
-        }
-
-    return {"ok": False, "code": None, "message": "Код ещё не пришёл, попробуйте через несколько секунд"}
+    # 600с (не дефолтные 120) — Claude присылает magic-link, а не код, и он
+    # живёт дольше пары минут; для обычного кода запас тоже не вредит.
+    code = await database.get_recent_otp(email, window_sec=600)
+    if not code:
+        return {"ok": False, "code": None, "message": "Код ещё не пришёл, попробуйте через несколько секунд"}
+    return {"ok": True, "code": code}
 
 
 class EmailHookBody(BaseModel):
@@ -945,14 +932,15 @@ async def email_hook(body: EmailHookBody, x_webhook_secret: str = Header(None)):
     этот эндпоинт). Публичный (без Telegram initData) эндпоинт — защищён
     отдельным заголовком-секретом, сверяемым constant-time.
 
-    Обычно приходит otp_code (код прямо в письме). Некоторые сервисы (Claude)
-    шлют только magic-link — код появляется лишь на странице, куда она ведёт,
-    и рендерится их собственным JS. Раньше это пытался открыть наш собственный
-    Playwright-браузер (resolve_magic_link_otp), но на практике ~40% попыток
-    упирались в Cloudflare Turnstile на самом claude.ai даже с прокси (риск-
-    скоринг серверных IP) — см. git-историю. Теперь ссылку просто сохраняем и
-    отдаём юзеру напрямую (см. /api/rental/otp) — он открывает её В СВОЁМ
-    браузере (реальный IP, никакого риск-скоринга), как это делают конкуренты."""
+    Обычно приходит otp_code (код прямо в письме). Claude вместо кода шлёт
+    только magic-link — раньше мы сами открывали её headful-браузером через
+    прокси аккаунта, чтобы вытащить код со страницы (resolve_magic_link_otp),
+    но это добавляло лишнюю точку отказа (прокси/детект автоматизации у
+    Anthropic) поверх и без того шаткого OTP-флоу. Вместо этого просто
+    отдаём ссылку арендатору как есть — он открывает её сам, в своей же
+    сессии, и либо сразу логинится, либо видит код на странице (см.
+    mini_app OtpButton — определяет по префиксу http(s) и рисует
+    Открыть/Копировать вместо голого кода)."""
     if not settings.EMAIL_WEBHOOK_SECRET or not x_webhook_secret or \
        not hmac.compare_digest(x_webhook_secret, settings.EMAIL_WEBHOOK_SECRET):
         raise HTTPException(401, "Invalid webhook secret")
@@ -967,8 +955,8 @@ async def email_hook(body: EmailHookBody, x_webhook_secret: str = Header(None)):
         return {"ok": True}
 
     if body.magic_link:
-        await database.insert_magic_link(email, body.magic_link)
-        logger.info(f"email-hook: magic link stored for {email}")
+        await database.insert_otp_code(email, body.magic_link)
+        logger.info(f"email-hook: magic link received for {email}, relaying as-is")
         return {"ok": True}
 
     raise HTTPException(400, "otp_code или magic_link обязателен")

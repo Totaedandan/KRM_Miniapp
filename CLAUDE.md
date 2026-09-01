@@ -63,10 +63,9 @@ API: `POST /api/order` (поле `is_premium`), `GET /api/admin/queue`, `POST /a
   `ai_accounts` (`email` UNIQUE, `proxy_id`, `cookies_data` JSON, статусы
   `available|rented|cooldown|maintenance|disabled|banned`), `ai_rentals` (аналог
   rental_orders: `paid_bonus`/`paid_main` для отображения, источник правды — ledger),
-  `otp_incoming_codes` (`recipient_email`, `otp_code`, короткое окно жизни),
-  `otp_incoming_links` (`recipient_email`, `magic_link`, короткое окно жизни —
-  см. «OTP / magic-link» ниже). Старые `rental_accounts`/`rental_orders` НЕ
-  удалены (не используются, история цела).
+  `otp_incoming_codes` (`recipient_email`, `otp_code`, короткое окно жизни —
+  сюда же кладётся и magic-link Claude, см. «OTP / magic-link» ниже). Старые
+  `rental_accounts`/`rental_orders` НЕ удалены (не используются, история цела).
 - **Покупка**: `create_ai_rental(...)` — атомарно: `_apply_bonus_debit` (бонус
   сначала, потом тенге) + захват **LRU-свободного** аккаунта (`ORDER BY
   (last_used_at IS NULL) DESC, last_used_at ASC` — свежедобавленные и дольше
@@ -81,18 +80,24 @@ API: `POST /api/order` (поле `is_premium`), `GET /api/admin/queue`, `POST /a
   либо `{recipient_email, magic_link}` (Claude — шлёт только ссылку "Sign in",
   код рисуется их собственным JS уже на странице). Авторизация — заголовок
   `X-Webhook-Secret` (constant-time сравнение с `EMAIL_WEBHOOK_SECRET` из `.env`,
-  **не Telegram initData** — это внешний публичный вебхук). `GET /api/rental/otp?email=`
-  отдаёт `{kind:"code", code}` или `{kind:"link", magic_link, expires_at}` —
-  владение email проверяется через `get_active_ai_rental_by_email` (нельзя
-  подсмотреть чужие данные). Скрипт воркера — `cloudflare/email-worker.js`
-  (не задеплоен автоматически — вставляется вручную в Cloudflare Dashboard,
-  инструкция в шапке файла).
-  Раньше magic-link пытался открыть наш Playwright-браузер (`resolve_magic_link_otp`,
-  удалена) — на практике ~40% попыток упирались в Cloudflare Turnstile на самом
-  claude.ai даже с прокси на аккаунте (риск-скоринг серверных IP). Теперь ссылку
-  просто отдаём юзеру (Mini App: копировать/открыть + отсчёт `MAGIC_LINK_TTL_SEC`
-  до истечения, оценка ~15 мин — Claude не документирует точный TTL) — он открывает
-  её в своём браузере (реальный IP, риска нет), как это делают конкуренты.
+  **не Telegram initData** — это внешний публичный вебхук). Оба случая кладутся
+  в `otp_incoming_codes` через один и тот же `insert_otp_code` — для magic-link
+  значение колонки `otp_code` просто оказывается полной ссылкой вместо цифр.
+  `GET /api/rental/otp?email=` отдаёт `{ok, code}` как раньше (окно поиска
+  расширено с 120 до 600с — ссылка живёт дольше пары минут); Mini App
+  (`OtpButton`) сам отличает ссылку от кода по префиксу `http(s)` и рисует
+  Копировать/Открыть вместо голого кода — владение email проверяется через
+  `get_active_ai_rental_by_email` (нельзя подсмотреть чужие данные). Скрипт
+  воркера — `cloudflare/email-worker.js` (не задеплоен автоматически —
+  вставляется вручную в Cloudflare Dashboard, инструкция в шапке файла).
+  Раньше magic-link пытался открыть наш Playwright-браузер
+  (`resolve_magic_link_otp`, удалена) — на практике заметная доля попыток
+  упиралась в Cloudflare Turnstile на самом claude.ai даже с прокси на
+  аккаунте (риск-скоринг серверных IP). Теперь ссылку просто отдаём юзеру,
+  он открывает её в своём браузере (реальный IP, риска нет) и либо сразу
+  логинится, либо видит код на странице сам — как это делают конкуренты.
+  Намеренно нет обратного отсчёта "истекает через X" — точный TTL magic-link
+  у Claude не задокументирован, выдумывать цифру рискованно.
 - **Авто-разлогин**: `services/ai_rental_service.py` — Playwright, **новый
   browser/context на каждую задачу** (не персистентный браузер, как у Turnitin),
   `proxy={...}` привязан к прокси конкретного аккаунта. `auto_logout(account,
