@@ -63,8 +63,10 @@ API: `POST /api/order` (поле `is_premium`), `GET /api/admin/queue`, `POST /a
   `ai_accounts` (`email` UNIQUE, `proxy_id`, `cookies_data` JSON, статусы
   `available|rented|cooldown|maintenance|disabled|banned`), `ai_rentals` (аналог
   rental_orders: `paid_bonus`/`paid_main` для отображения, источник правды — ledger),
-  `otp_incoming_codes` (`recipient_email`, `otp_code`, короткое окно жизни).
-  Старые `rental_accounts`/`rental_orders` НЕ удалены (не используются, история цела).
+  `otp_incoming_codes` (`recipient_email`, `otp_code`, короткое окно жизни),
+  `otp_incoming_links` (`recipient_email`, `magic_link`, короткое окно жизни —
+  см. «OTP / magic-link» ниже). Старые `rental_accounts`/`rental_orders` НЕ
+  удалены (не используются, история цела).
 - **Покупка**: `create_ai_rental(...)` — атомарно: `_apply_bonus_debit` (бонус
   сначала, потом тенге) + захват **LRU-свободного** аккаунта (`ORDER BY
   (last_used_at IS NULL) DESC, last_used_at ASC` — свежедобавленные и дольше
@@ -74,14 +76,23 @@ API: `POST /api/order` (поле `is_premium`), `GET /api/admin/queue`, `POST /a
 - **Возврат**: `cancel_ai_rental_with_refund` — `_get_charge_split` возвращает
   каждую валюту туда, откуда списалась (бонус/тенге), не всегда в тенге (иначе
   можно отмыть бонус в реальные деньги через покупку+отмену). Аккаунт → `cooldown`.
-- **OTP**: `POST /api/email-hook` принимает `{recipient_email, otp_code}` от
-  Cloudflare Worker'а, авторизация — заголовок `X-Webhook-Secret` (constant-time
-  сравнение с `EMAIL_WEBHOOK_SECRET` из `.env`, **не Telegram initData** — это
-  внешний публичный вебхук). `GET /api/rental/otp?email=` — юзер запрашивает код,
+- **OTP / magic-link**: `POST /api/email-hook` принимает от Cloudflare Worker'а
+  либо `{recipient_email, otp_code}` (код прямо в письме — большинство сервисов),
+  либо `{recipient_email, magic_link}` (Claude — шлёт только ссылку "Sign in",
+  код рисуется их собственным JS уже на странице). Авторизация — заголовок
+  `X-Webhook-Secret` (constant-time сравнение с `EMAIL_WEBHOOK_SECRET` из `.env`,
+  **не Telegram initData** — это внешний публичный вебхук). `GET /api/rental/otp?email=`
+  отдаёт `{kind:"code", code}` или `{kind:"link", magic_link, expires_at}` —
   владение email проверяется через `get_active_ai_rental_by_email` (нельзя
-  подсмотреть чужой код). Скрипт воркера — `cloudflare/email-worker.js`
+  подсмотреть чужие данные). Скрипт воркера — `cloudflare/email-worker.js`
   (не задеплоен автоматически — вставляется вручную в Cloudflare Dashboard,
   инструкция в шапке файла).
+  Раньше magic-link пытался открыть наш Playwright-браузер (`resolve_magic_link_otp`,
+  удалена) — на практике ~40% попыток упирались в Cloudflare Turnstile на самом
+  claude.ai даже с прокси на аккаунте (риск-скоринг серверных IP). Теперь ссылку
+  просто отдаём юзеру (Mini App: копировать/открыть + отсчёт `MAGIC_LINK_TTL_SEC`
+  до истечения, оценка ~15 мин — Claude не документирует точный TTL) — он открывает
+  её в своём браузере (реальный IP, риска нет), как это делают конкуренты.
 - **Авто-разлогин**: `services/ai_rental_service.py` — Playwright, **новый
   browser/context на каждую задачу** (не персистентный браузер, как у Turnitin),
   `proxy={...}` привязан к прокси конкретного аккаунта. `auto_logout(account,

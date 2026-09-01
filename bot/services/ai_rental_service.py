@@ -20,7 +20,6 @@ otp_incoming_codes, что уже работает для арендатора �
 import asyncio
 import logging
 import os
-import re
 import sys
 import time
 from typing import Optional
@@ -303,105 +302,5 @@ async def auto_logout(account: dict, service_type: str, proxy_url: Optional[str]
         except Exception as e:
             logger.error(f"auto_logout error для {email}: {e}", exc_info=True)
             return False
-        finally:
-            await browser.close()
-
-
-_CF_CHALLENGE_MARKERS = ("Verify you are human", "Just a moment", "Performing security verification")
-
-
-async def resolve_magic_link_otp(email: str, magic_link: str):
-    """Некоторые сервисы (Claude) не кладут код прямо в письмо — только ссылку
-    "Sign in". Сам код появляется лишь на странице, куда она ведёт, и только
-    если её открывают НЕ из той сессии, что запрашивала вход (см. текст на
-    форме логина Claude: "If the link shows a verification code instead of
-    signing you in, enter it here") — у нас именно такой случай, письмо читает
-    Cloudflare Worker, а не браузер арендатора. Ссылка при этом с фрагментом
-    (#токен) — он не долетает до сервера в обычном fetch(), а код к тому же
-    дорисовывается JS-ом самой страницы, так что нужен настоящий браузер, а
-    не текстовый запрос. Идём через прокси аккаунта (если назначен), чтобы не
-    плодить для одного и того же email разные IP на коротком отрезке времени.
-    Результат кладётся в otp_incoming_codes — дальше всё как с обычным OTP,
-    /api/rental/otp его подхватит тем же способом.
-
-    На живых тестах даже с назначенным прокси claude.ai иногда (по логам —
-    заметная доля попыток) отдаёт Cloudflare Turnstile ("Performing security
-    verification") вместо страницы с кодом — риск-скоринг, а не отсутствие
-    прокси как таковое. Полноценного решения капчи нет (см. _solve_captcha_if_present),
-    поэтому при обнаружении именно такого челленджа пробуем ещё раз (до 3 попыток)
-    с СВЕЖИМ browser context (чистые cookies/storage) — тот же прокси и ссылка,
-    но новый "отпечаток" сессии иногда проходит там, где предыдущий словил челлендж.
-    Если код не появился по ДРУГОЙ причине (не Cloudflare) — повтор не поможет,
-    сразу сдаёмся."""
-    from database import db as database
-
-    account = await database.get_ai_account_by_email(email)
-    proxy_url = None
-    if account and account.get("proxy_id"):
-        proxy_row = await database.get_ai_proxy(account["proxy_id"])
-        proxy_url = proxy_row["proxy_url"] if proxy_row else None
-
-    await _ensure_xvfb()
-    proxy = _parse_proxy(proxy_url) if proxy_url else None
-
-    args = [
-        "--no-sandbox",
-        "--disable-blink-features=AutomationControlled",
-        "--window-size=1280,1200",
-        "--disable-dev-shm-usage",
-        "--no-first-run",
-        "--no-default-browser-check",
-    ]
-    if sys.platform == "linux":
-        args += ["--window-position=0,0", "--disable-gpu", "--disable-software-rasterizer"]
-    else:
-        args.append("--window-position=-32000,-32000")
-
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=False, args=args)
-        try:
-            for attempt in range(1, 4):
-                context = await browser.new_context(proxy=proxy) if proxy else await browser.new_context()
-                page = await context.new_page()
-                code = None
-                text = ""
-                try:
-                    await page.goto(magic_link, wait_until="domcontentloaded", timeout=30000)
-                    await _solve_captcha_if_present(page)
-
-                    i = 0
-                    for i in range(20):
-                        try:
-                            text = await page.inner_text("body")
-                        except Exception:
-                            text = ""
-                        m = re.search(r"\b(\d{6})\b", text)
-                        if m:
-                            code = m.group(1)
-                            break
-                        await asyncio.sleep(1)
-
-                    if code:
-                        await database.insert_otp_code(email, code)
-                        logger.info("magic-link resolved for %s after %ds (попытка %d/3)", email, i, attempt)
-                        return
-
-                    if not any(marker in text for marker in _CF_CHALLENGE_MARKERS):
-                        logger.warning("magic-link %s: код не появился на странице за 20с", email)
-                        await _debug_shot(page, "claude_magiclink_no_code")
-                        return
-
-                    logger.warning(
-                        "magic-link %s: Cloudflare challenge на попытке %d/3 — пробуем ещё раз "
-                        "с чистым контекстом", email, attempt,
-                    )
-                    if attempt == 3:
-                        await _debug_shot(page, "claude_magiclink_challenge_final")
-                finally:
-                    await context.close()
-
-                await asyncio.sleep(3)
-        except Exception as e:
-            logger.error("resolve_magic_link_otp error for %s: %s", email, e, exc_info=True)
         finally:
             await browser.close()

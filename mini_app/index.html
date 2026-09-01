@@ -1106,7 +1106,7 @@ const OTP_COOLDOWN_SEC = 30;
 
 function OtpButton({ email, showToast }) {
   const [loading, setLoading] = useState(false);
-  const [code, setCode] = useState(null);
+  const [result, setResult] = useState(null);   // {kind:'code',code} | {kind:'link',magic_link,expires_at}
   const [cooldown, setCooldown] = useState(0);
 
   useEffect(() => {
@@ -1120,8 +1120,8 @@ function OtpButton({ email, showToast }) {
     setLoading(true);
     try {
       const res = await api(`/api/rental/otp?email=${encodeURIComponent(email)}`);
-      if (res.ok && res.code) {
-        setCode(res.code);
+      if (res.ok && (res.code || res.magic_link)) {
+        setResult(res);
         navigator.vibrate?.(30);
       } else {
         showToast(res.message || 'Код ещё не пришёл, попробуйте через несколько секунд');
@@ -1134,26 +1134,45 @@ function OtpButton({ email, showToast }) {
     }
   };
 
-  const copy = () => code && navigator.clipboard?.writeText(code).then(() => showToast('Код скопирован'));
+  const copy = (v, label) => v && navigator.clipboard?.writeText(v).then(() => showToast(label + ' скопирован'));
+  const openLink = (url) => tg?.openLink ? tg.openLink(url) : window.open(url, '_blank');
+  const linkExpired = result?.kind === 'link' && parseUTC(result.expires_at) - Date.now() <= 0;
 
   return (
     <div style={{marginTop:10}} onClick={e => e.stopPropagation()}>
-      {code && (
+      {result?.kind === 'code' && (
         <div className="cred-row">
           <div style={{minWidth:0}}>
             <div className="cred-lbl">Код входа</div>
-            <div className="cred-val" style={{fontSize:20,letterSpacing:2,fontWeight:800}}>{code}</div>
+            <div className="cred-val" style={{fontSize:20,letterSpacing:2,fontWeight:800}}>{result.code}</div>
           </div>
-          <button className="btn-sm btn-sm-blue" onClick={copy}>{React.cloneElement(ICONS.copy,{width:15,height:15})}</button>
+          <button className="btn-sm btn-sm-blue" onClick={() => copy(result.code, 'Код')}>{React.cloneElement(ICONS.copy,{width:15,height:15})}</button>
         </div>
       )}
-      <button className="btn btn-secondary" style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'center',gap:8}}
+      {result?.kind === 'link' && (
+        <div className="cred-row" style={{flexDirection:'column',alignItems:'stretch',gap:8}}>
+          <div>
+            <div className="cred-lbl">Ссылка для входа</div>
+            <div className="cred-val" style={{fontSize:12,fontWeight:500,lineHeight:1.4}}>{result.magic_link}</div>
+          </div>
+          <div style={{display:'flex',gap:8}}>
+            <button className="btn-sm btn-sm-blue" style={{flex:1}} onClick={() => copy(result.magic_link, 'Ссылка')}>Копировать</button>
+            <button className="btn-sm" style={{flex:1,background:'var(--accent)',color:'#fff'}} onClick={() => openLink(result.magic_link)}>Открыть</button>
+          </div>
+          <div style={{fontSize:11,color:'var(--txt2)'}}>
+            {linkExpired
+              ? 'Ссылка истекла — запросите новую'
+              : <>Действует ещё <Countdown expiresAt={result.expires_at}/> · потом запросите новую</>}
+          </div>
+        </div>
+      )}
+      <button className="btn btn-secondary" style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'center',gap:8,marginTop: result ? 8 : 0}}
         onClick={getCode} disabled={loading || cooldown > 0}>
         {loading
           ? <><span className="spinner-sm" style={{borderTopColor:'var(--accent-2)'}}/> Запрашиваю…</>
           : cooldown > 0
             ? `Повторить через ${cooldown}с`
-            : <>{React.cloneElement(ICONS.key,{width:15,height:15})} {code ? 'Обновить код' : 'Получить код'}</>}
+            : <>{React.cloneElement(ICONS.key,{width:15,height:15})} {result ? 'Обновить' : 'Получить код'}</>}
       </button>
     </div>
   );
