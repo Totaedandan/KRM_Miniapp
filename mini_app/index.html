@@ -1968,6 +1968,7 @@ function AdminScreen({ toast }) {
       { key:'kaspi_recipient_name', label:'Kaspi Получатель',type:'text' },
       { key:'help_username',      label:'Поддержка @username',type:'text' },
       { key:'help_phone',         label:'Поддержка Телефон', type:'text' },
+      { key:'required_channel_username', label:'Обязательный канал (username без @, пусто = выключено)', type:'text' },
     ];
     return (
       <div className="screen">
@@ -2288,12 +2289,40 @@ function AdminScreen({ toast }) {
   return null;
 }
 
+// ── Гейт подписки на канал ───────────────────────────────────────────────────
+function SubscriptionGate({ channel, checking, onRecheck }) {
+  const openChannel = () => {
+    const url = `https://t.me/${channel}`;
+    tg?.openLink ? tg.openLink(url) : window.open(url, '_blank');
+  };
+  return (
+    <div className="screen" style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:'100vh',textAlign:'center',gap:16,padding:'0 24px'}}>
+      <div style={{width:64,height:64,borderRadius:20,background:'var(--accent-soft)',display:'flex',alignItems:'center',justifyContent:'center'}}>
+        {React.cloneElement(ICONS.bell,{width:30,height:30,color:'var(--accent-2)'})}
+      </div>
+      <div>
+        <h2 style={{marginBottom:8}}>Подпишись, чтобы пользоваться ботом</h2>
+        <p style={{color:'var(--txt2)',fontSize:14,lineHeight:1.5,margin:0}}>
+          Доступ ко всем функциям открыт только подписчикам канала <b>@{channel}</b>.
+        </p>
+      </div>
+      <div style={{width:'100%',display:'flex',flexDirection:'column',gap:10,marginTop:8}}>
+        <button className="btn btn-primary" onClick={openChannel}>Открыть канал</button>
+        <button className="btn btn-secondary" style={{display:'flex',alignItems:'center',justifyContent:'center',gap:8}} onClick={onRecheck} disabled={checking}>
+          {checking ? <><span className="spinner-sm" style={{borderTopColor:'var(--accent-2)'}}/> Проверяю…</> : 'Я подписался'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── App ──────────────────────────────────────────────────────────────────────
 function App() {
   const [tab,    setTab]    = useState('home');
   const [user,   setUser]   = useState(null);
   const [orders, setOrd]    = useState([]);
   const [loading,setLoad]   = useState(true);
+  const [checkingSub, setCheckingSub] = useState(false);
   const [toast,  showToast] = useToast();
 
   const load = useCallback(async () => {
@@ -2310,6 +2339,16 @@ function App() {
     load();
   }, []);
 
+  const recheckSubscription = async () => {
+    setCheckingSub(true);
+    try {
+      const me = await api('/api/me');
+      setUser(me);
+      if (!me.is_subscribed) showToast('Пока не вижу подписку — попробуйте ещё раз через пару секунд');
+    } catch(e) { showToast(e.message); }
+    finally { setCheckingSub(false); }
+  };
+
   // Частичное обновление баланса без полной перезагрузки
   const updateBalance = (patch) => setUser(u => u ? {...u, ...patch} : u);
 
@@ -2324,6 +2363,15 @@ function App() {
   const navActive = ({ turnitin:'home', humanizer:'home' })[tab] || tab;
 
   if (loading) return <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh'}}><Spinner/></div>;
+
+  if (user?.required_channel && !user.is_subscribed) {
+    return (
+      <>
+        <Toast msg={toast}/>
+        <SubscriptionGate channel={user.required_channel} checking={checkingSub} onRecheck={recheckSubscription}/>
+      </>
+    );
+  }
 
   return (
     <>

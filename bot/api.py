@@ -70,7 +70,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import settings
 from database import db as database
-from bot_sender import send_message as _bot_send, send_document as _bot_send_document
+from bot_sender import (
+    send_message as _bot_send,
+    send_document as _bot_send_document,
+    get_chat_member as _bot_get_chat_member,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +141,32 @@ async def _get_admin(x_telegram_init_data: str = Header(None)) -> dict:
     return user
 
 
+async def _check_subscription(tg_id: int) -> dict:
+    """Гейт «подпишись на канал, чтобы пользоваться ботом» — настраивается в
+    админке (settings.required_channel_username, без @; пусто = гейт выключен).
+    Админы проходят без проверки, как и everywhere else в проекте.
+
+    Мягкая проверка на момент открытия Mini App (см. /api/me), НЕ на каждый
+    запрос — постоянная перепроверка (юзер отписался после того как получил
+    доступ) сознательно отложена на потом.
+
+    При сбое запроса к Telegram (бот не админ канала, сеть и т.п.) — fail-open:
+    считаем подписанным, чтобы наша же ошибка не заблокировала всех подряд.
+    """
+    channel = (await database.get_setting("required_channel_username") or "").strip().lstrip("@")
+    if not channel:
+        return {"channel": None, "subscribed": True}
+    if settings.is_admin(tg_id):
+        return {"channel": channel, "subscribed": True}
+
+    member = await _bot_get_chat_member(f"@{channel}", tg_id)
+    if member is None:
+        logger.warning(f"subscription check failed for {tg_id} — failing open")
+        return {"channel": channel, "subscribed": True}
+    subscribed = member.get("status") in ("creator", "administrator", "member")
+    return {"channel": channel, "subscribed": subscribed}
+
+
 # ── Статика ───────────────────────────────────────────────────────────────────
 
 @app.get("/")
@@ -154,6 +184,7 @@ async def get_me(x_telegram_init_data: str = Header(None)):
     user     = await _get_user(x_telegram_init_data)
     prices   = await database.get_prices()
     packages = await database.get_token_packages()
+    sub      = await _check_subscription(user["tg_id"])
     return {
         "tg_id":           user["tg_id"],
         "username":        user.get("username"),
@@ -163,6 +194,8 @@ async def get_me(x_telegram_init_data: str = Header(None)):
         "bonus_balance":   round(user.get("bonus_balance", 0.0), 2),
         "is_whitelisted":  bool(user.get("is_whitelisted")),
         "is_admin":        settings.is_admin(user["tg_id"]),
+        "required_channel": sub["channel"],
+        "is_subscribed":   sub["subscribed"],
         "prices":          prices,
         "premium_multiplier": await database.get_premium_multiplier(),
         "packages":        packages,
@@ -487,6 +520,7 @@ EDITABLE_SETTINGS = {
     "turnitin_class_id_premium", "turnitin_assign_id_premium", "premium_multiplier",
     "kaspi_phone", "kaspi_recipient_name",
     "help_username", "help_phone",
+    "required_channel_username",
 }
 
 

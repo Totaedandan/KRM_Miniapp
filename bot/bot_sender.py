@@ -3,6 +3,8 @@
 Используется из FastAPI (без импорта aiogram Bot).
 """
 import logging
+from typing import Optional
+
 import httpx
 from config import settings
 
@@ -45,3 +47,23 @@ async def send_document(chat_id: int, filename: str, content: bytes,
     except Exception as e:
         logger.error(f"bot_sender.send_document error: {e}")
         return False
+
+
+async def get_chat_member(chat_id: str, user_id: int) -> Optional[dict]:
+    """Участник чата ({status, ...}) или None при сбое (бот не админ канала,
+    канал не существует, сетевая ошибка и т.п.) — вызывающий код должен сам
+    решить, как трактовать None (см. api.py::_check_subscription — fail-open)."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{_BOT_API}/getChatMember",
+                params={"chat_id": chat_id, "user_id": user_id},
+            )
+            data = r.json()
+            if not data.get("ok"):
+                logger.warning(f"bot_sender.get_chat_member: {data}")
+                return None
+            return data["result"]
+    except Exception as e:
+        logger.error(f"bot_sender.get_chat_member error: {e}")
+        return None
