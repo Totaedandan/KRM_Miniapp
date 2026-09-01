@@ -2293,7 +2293,11 @@ function AdminScreen({ toast }) {
 function SubscriptionGate({ channel, checking, onRecheck }) {
   const openChannel = () => {
     const url = `https://t.me/${channel}`;
-    tg?.openLink ? tg.openLink(url) : window.open(url, '_blank');
+    // openTelegramLink — специально для t.me-ссылок, открывает канал внутри
+    // самого Telegram; openLink увёл бы во внешний/встроенный браузер.
+    if (tg?.openTelegramLink) tg.openTelegramLink(url);
+    else if (tg?.openLink) tg.openLink(url);
+    else window.open(url, '_blank');
   };
   return (
     <div className="screen" style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:'100vh',textAlign:'center',gap:16,padding:'0 24px'}}>
