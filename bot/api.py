@@ -27,6 +27,7 @@ FastAPI — бэкенд для Telegram Mini App.
   GET  /api/admin/whitelist
   POST /api/admin/whitelist/add
   POST /api/admin/whitelist/remove
+  GET  /api/admin/whitelist/orders
   GET  /api/admin/banlist
   POST /api/admin/ban
   POST /api/admin/unban
@@ -389,6 +390,15 @@ async def admin_wl_remove(body: WlBody, x_telegram_init_data: str = Header(None)
     if not ok:
         raise HTTPException(404, "Пользователь не найден в БД")
     return {"ok": True}
+
+
+@app.get("/api/admin/whitelist/orders")
+async def admin_whitelist_orders(x_telegram_init_data: str = Header(None)):
+    """История бесплатных заказов Turnitin (whitelist + админы) — кто и
+    сколько раз воспользовался бесплатным доступом."""
+    await _get_admin(x_telegram_init_data)
+    orders = await database.get_whitelist_orders(limit=100)
+    return {"orders": orders}
 
 
 # -- Banlist ------------------------------------------------------------------

@@ -765,6 +765,21 @@ async def get_whitelist_users() -> list[dict]:
         return [dict(r) for r in await cur.fetchall()]
 
 
+async def get_whitelist_orders(limit: int = 100) -> list[dict]:
+    """История заказов Turnitin, прошедших бесплатно через whitelist
+    (payment_method='whitelist' — ставится и для юзеров из БД-вайтлиста, и для
+    админов из ADMIN_IDS/SUPERADMIN_ID, см. settings.is_admin). Для админки —
+    видно, кто и сколько бесплатных проверок сделал."""
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM turnitin_orders WHERE payment_method='whitelist' "
+            "ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
 async def find_user(query: str) -> Optional[dict]:
     """Найти пользователя по tg_id или username."""
     async with aiosqlite.connect(_DB_PATH) as db:

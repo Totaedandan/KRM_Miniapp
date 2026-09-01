@@ -1371,6 +1371,7 @@ function AdminScreen({ toast }) {
   const [orders,     setOrders]     = useState([]);
   const [queue,      setQueue]      = useState({ premium:[], regular:[], total:0 });
   const [wlUsers,    setWlUsers]    = useState([]);
+  const [wlOrders,   setWlOrders]   = useState([]);
   const [banData,    setBanData]    = useState({ by_id:[], by_username:[] });
   const [wlInput,    setWlInput]    = useState('');
   const [banInput,   setBanInput]   = useState('');
@@ -1421,6 +1422,7 @@ function AdminScreen({ toast }) {
       if (v === 'stats') { const d = await api('/api/admin/stats'); setStats(d); }
       if (v === 'orders') { const d = await api('/api/admin/queue'); setQueue(d); }
       if (v === 'whitelist') { const d = await api('/api/admin/whitelist'); setWlUsers(d.users||[]); }
+      if (v === 'whitelist_orders') { const d = await api('/api/admin/whitelist/orders'); setWlOrders(d.orders||[]); }
       if (v === 'banlist') { const d = await api('/api/admin/banlist'); setBanData(d); }
       if (v === 'prices') {
         const d = await api('/api/prices'); setPrices(d);
@@ -1450,6 +1452,7 @@ function AdminScreen({ toast }) {
     { v:'rental_orders',   icon:'clock', label:'Аренда: активные',sub:'Отмена с возвратом' },
     { v:'rental_otp_logs', icon:'inbox', label:'Аренда: OTP-логи',sub:'Входящие коды' },
     { v:'whitelist', icon:'shield', label:'Whitelist',   sub:'Бесплатный доступ' },
+    { v:'whitelist_orders', icon:'inbox', label:'Заказы WL', sub:'История бесплатных' },
     { v:'banlist',   icon:'ban',    label:'Бан-лист',    sub:'Заблокированные' },
     { v:'user',      icon:'search', label:'Найти юзера', sub:'ID или @username' },
     { v:'receipt',   icon:'search', label:'Поиск по чеку', sub:'QR-номер Kaspi' },
@@ -1559,7 +1562,11 @@ function AdminScreen({ toast }) {
     };
     return (
       <div className="screen">
-        <Back/><h2 style={{marginBottom:14}}>Whitelist</h2>
+        <Back/>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}>
+          <h2 style={{marginBottom:0}}>Whitelist</h2>
+          <button className="btn-sm btn-sm-blue" onClick={()=>go('whitelist_orders')}>Заказы →</button>
+        </div>
         <div className="adm-row">
           <input className="adm-input" placeholder="Telegram ID" value={wlInput} onChange={e=>setWlInput(e.target.value)}/>
           <button className="btn-sm btn-sm-green" onClick={addWl}>Добавить</button>
@@ -1571,6 +1578,25 @@ function AdminScreen({ toast }) {
               <div className="order-meta">@{u.username||'—'} · {u.tg_id}</div>
             </div>
             <button className="btn-sm btn-sm-red" onClick={()=>rmWl(u.tg_id)}>Убрать</button>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (view === 'whitelist_orders') {
+    const TYPE_LBL = { sim:'Плагиат', ai:'AI-детекция', both:'Оба' };
+    return (
+      <div className="screen">
+        <Back to="whitelist"/>
+        <h2 style={{marginBottom:6}}>Заказы по Whitelist</h2>
+        <p style={{marginBottom:14,color:'var(--txt2)',fontSize:13}}>Последние {wlOrders.length} бесплатных заказов (whitelist + админы)</p>
+        {loading ? <Spinner/> : wlOrders.length === 0 ? <p className="empty">Пока пусто</p> : wlOrders.map(o => (
+          <div key={o.id} className="order-row">
+            <div style={{flex:1}}>
+              <div style={{fontWeight:600}}>#{o.id} · {TYPE_LBL[o.report_type]||o.report_type} · @{o.username||o.user_id}</div>
+              <div className="order-meta">{statusTag(o.status)} · {(o.created_at||'').slice(0,16).replace('T',' ')}</div>
+            </div>
           </div>
         ))}
       </div>
