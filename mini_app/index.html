@@ -1108,12 +1108,19 @@ function OtpButton({ email, showToast }) {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);   // {kind:'code',code} | {kind:'link',magic_link,expires_at}
   const [cooldown, setCooldown] = useState(0);
+  const [, forceTick] = useState(0);            // тикает раз в сек, пока показана ссылка — чтобы linkExpired ниже пересчитывался
 
   useEffect(() => {
     if (cooldown <= 0) return;
     const t = setInterval(() => setCooldown(c => c > 0 ? c - 1 : 0), 1000);
     return () => clearInterval(t);
   }, [cooldown > 0]);
+
+  useEffect(() => {
+    if (result?.kind !== 'link') return;
+    const t = setInterval(() => forceTick(x => x + 1), 1000);
+    return () => clearInterval(t);
+  }, [result?.kind === 'link']);
 
   const getCode = async () => {
     if (loading || cooldown > 0) return;
