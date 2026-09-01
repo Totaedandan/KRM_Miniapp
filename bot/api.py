@@ -69,7 +69,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import settings
 from database import db as database
-from bot_sender import send_message as _bot_send
+from bot_sender import send_message as _bot_send, send_document as _bot_send_document
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +249,9 @@ async def humanize(body: HumanizeRequest, x_telegram_init_data: str = Header(Non
         await database.deduct_tokens(user["tg_id"], cost, reason="humanizer")
 
     new_balance = await database.get_token_balance(user["tg_id"])
+    asyncio.create_task(_send_humanize_result_to_chat(
+        user["tg_id"], result, word_count, cost, is_wl, new_balance,
+    ))
     return {
         "result":       result,
         "words_input":  word_count,
@@ -256,6 +259,28 @@ async def humanize(body: HumanizeRequest, x_telegram_init_data: str = Header(Non
         "tokens_spent": cost if not is_wl else 0,
         "balance":      round(new_balance, 2),
     }
+
+
+async def _send_humanize_result_to_chat(tg_id: int, result: str, word_count: int,
+                                         cost: float, is_wl: bool, new_balance: float):
+    """Дублирует результат хуманайзера в чат — как в bot-flow (handlers/humanizer.py),
+    иначе он виден только внутри Mini App."""
+    header = (
+        f"✅ <b>Готово!</b> (из приложения)\n"
+        f"📊 Слов: {word_count} → {len(result.split())}\n"
+        f"{'💰 Списано: <b>' + str(cost) + ' 🪙</b>' if not is_wl else '✨ Бесплатно (whitelist)'}\n"
+        f"{'🪙 Баланс: <b>' + str(round(new_balance, 1)) + '</b>' if not is_wl else ''}\n"
+        f"─────────────────────\n"
+    )
+    if len(header) + len(result) <= 4000:
+        await _bot_send(tg_id, header)
+        await _bot_send(tg_id, result, parse_mode="")
+    else:
+        await _bot_send(tg_id, header)
+        await _bot_send_document(
+            tg_id, "humanized.txt", result.encode("utf-8"),
+            caption="📎 Результат (файл — текст слишком длинный для сообщения)",
+        )
 
 
 # ── ADMIN API ─────────────────────────────────────────────────────────────────
