@@ -360,6 +360,19 @@ async function api(path, opts = {}) {
   return res.json();
 }
 
+// Для FormData — Content-Type НЕ ставим сами, иначе браузер не проставит
+// правильный multipart boundary и сервер не сможет разобрать файл.
+async function apiUpload(path, formData) {
+  const initData = tg?.initData || '';
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'X-Telegram-Init-Data': initData },
+    body: formData,
+  });
+  if (!res.ok) { const e = await res.json().catch(() => ({ detail: res.statusText })); throw new Error(e.detail || 'Error'); }
+  return res.json();
+}
+
 function fmt(n) { return Number(n || 0).toLocaleString('ru-RU'); }
 function fmtT(n) { return (Number(n || 0)).toFixed(1); }
 
@@ -480,7 +493,7 @@ function HomeScreen({ user, orders, onNav }) {
 }
 
 // ── TurnitinScreen ───────────────────────────────────────────────────────────
-function TurnitinScreen({ user, prices, premiumMult, onNav, onBalanceUpdate }) {
+function TurnitinScreen({ user, prices, premiumMult, onNav, onBalanceUpdate, onRefresh }) {
   const [toast, showToast] = useToast();
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(null); // { order_id, is_premium }
@@ -521,6 +534,7 @@ function TurnitinScreen({ user, prices, premiumMult, onNav, onBalanceUpdate }) {
       reqIdRef.current = null;         // успех — следующий заказ получит новый ключ
       setSuccess({ order_id: res.order_id, is_premium: res.is_premium });
       onBalanceUpdate && onBalanceUpdate({ tenge_balance: res.balance, bonus_balance: res.bonus_balance });
+      onRefresh && onRefresh();        // подтянуть новый заказ в orders — баннер "ждём файл" появится сразу
     } catch(e) {
       showToast(e.message);    // ключ сохраняем: ретрай дедуплицируется
     } finally {
@@ -534,9 +548,9 @@ function TurnitinScreen({ user, prices, premiumMult, onNav, onBalanceUpdate }) {
       <h2 style={{marginBottom:8}}>Заказ #{success.order_id} создан</h2>
       <p style={{marginBottom:24,maxWidth:300}}>
         {success.is_premium
-          ? <>Премиум-очередь — мы <b>сейчас же</b> попросим файл в чате бота. У вас будет <b>3 минуты</b> на отправку.</>
-          : <>Место в очереди забронировано. Когда подойдёт очередь, бот попросит файл — на отправку даётся <b>3 минуты</b>.</>}
-        <br/><br/>Форматы: .pdf · .docx · .doc · .txt · .rtf
+          ? <>Премиум-очередь — прямо <b>сейчас</b> запросим файл. У вас будет <b>3 минуты</b> на отправку — прямо здесь в приложении (баннер сверху) или в чате бота.</>
+          : <>Место в очереди забронировано. Когда подойдёт очередь — появится баннер сверху с загрузкой (или напишем в чат), на отправку даётся <b>3 минуты</b>.</>}
+        <br/><br/>Форматы: .pdf · .docx · .doc · .txt · .rtf · до 100 МБ
       </p>
       <button className="btn btn-primary" style={{width:'auto',padding:'12px 32px'}} onClick={() => setSuccess(null)}>
         Создать ещё
@@ -2292,6 +2306,63 @@ function AdminScreen({ toast }) {
   return null;
 }
 
+// ── Баннер "ждём файл" — виден на любом экране, пока есть заказ awaiting_file.
+// Раньше файл принимался только в чате бота (лимит Telegram Bot API — 20 МБ,
+// поднять нельзя без своего локального Bot API сервера). Загрузка отсюда идёт
+// обычным HTTP на свой backend, Telegram в передаче не участвует — лимит 100 МБ,
+// как у самого Turnitin (см. POST /api/order/{id}/file).
+function AwaitingFileBanner({ order, onDone, showToast }) {
+  const fileRef = useRef();
+  const [uploading, setUploading] = useState(false);
+  const deadline = parseUTC(order.updated_at).getTime() + 180000;
+  const [left, setLeft] = useState(() => Math.max(0, Math.round((deadline - Date.now()) / 1000)));
+
+  useEffect(() => {
+    const t = setInterval(() => {
+      const next = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+      setLeft(next);
+      if (next <= 0) { clearInterval(t); onDone(); }
+    }, 1000);
+    return () => clearInterval(t);
+  }, [order.id, order.updated_at]);
+
+  const onFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      await apiUpload(`/api/order/${order.id}/file`, fd);
+      showToast('Файл принят!');
+      onDone();
+    } catch(err) {
+      showToast(err.message);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const mm = String(Math.floor(left / 60)).padStart(2, '0');
+  const ss = String(left % 60).padStart(2, '0');
+  const label = { sim:'Плагиат', ai:'AI-детекция', both:'Оба отчёта' }[order.report_type] || order.report_type;
+
+  return (
+    <div style={{position:'sticky',top:0,zIndex:40,background:'var(--accent)',color:'#fff',padding:'12px 16px',display:'flex',alignItems:'center',gap:12}}>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{fontWeight:700,fontSize:13}}>Заказ #{order.id} · {label} — ждём файл</div>
+        <div style={{fontSize:12,opacity:.85}}>Осталось {mm}:{ss} · .pdf .docx .doc .txt .rtf · до 100 МБ</div>
+      </div>
+      <input ref={fileRef} type="file" accept=".pdf,.docx,.doc,.txt,.rtf" style={{display:'none'}} onChange={onFile}/>
+      <button onClick={() => fileRef.current?.click()} disabled={uploading}
+        style={{flexShrink:0,background:'#fff',color:'var(--accent)',border:'none',borderRadius:10,padding:'9px 16px',fontWeight:700,fontSize:13,cursor:'pointer',display:'flex',alignItems:'center',gap:6}}>
+        {uploading ? <span className="spinner-sm" style={{borderTopColor:'var(--accent)'}}/> : 'Загрузить'}
+      </button>
+    </div>
+  );
+}
+
 // ── Гейт подписки на канал ───────────────────────────────────────────────────
 function SubscriptionGate({ channel, checking, onRecheck }) {
   const openChannel = () => {
@@ -2380,11 +2451,14 @@ function App() {
     );
   }
 
+  const awaitingOrder = orders.find(o => o.status === 'awaiting_file');
+
   return (
     <>
       <Toast msg={toast}/>
+      {awaitingOrder && <AwaitingFileBanner order={awaitingOrder} onDone={load} showToast={showToast}/>}
       {tab==='home'      && <HomeScreen     user={user} orders={orders} onNav={setTab}/>}
-      {tab==='turnitin'  && <TurnitinScreen user={user} prices={user?.prices} premiumMult={user?.premium_multiplier||1.5} onNav={setTab} onBalanceUpdate={updateBalance}/>}
+      {tab==='turnitin'  && <TurnitinScreen user={user} prices={user?.prices} premiumMult={user?.premium_multiplier||1.5} onNav={setTab} onBalanceUpdate={updateBalance} onRefresh={load}/>}
       {tab==='humanizer' && <HumanizerScreen user={user} onNav={setTab} onBalanceUpdate={b => updateBalance({token_balance:b})}/>}
       {tab==='rental'    && <RentalScreen   user={user} onNav={setTab} onBalanceUpdate={updateBalance}/>}
       {tab==='wallet'    && <WalletScreen   user={user} packages={user?.packages} onRefresh={load} onBalanceUpdate={updateBalance}/>}

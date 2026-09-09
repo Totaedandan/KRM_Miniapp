@@ -218,12 +218,15 @@ class TurnitinQueueManager:
         lang_note = ("\n⚠️ Для AI-детекции текст должен быть на <b>английском</b>."
                      if order["report_type"] in ("ai", "both") else "")
         prefix = "⚡ <b>Премиум-заказ" if premium else "🚀 <b>Ваша очередь подошла! Заказ"
+        from keyboards.main_kb import open_app_inline
         await self._send(order["user_id"],
             f"{prefix} #{order_id}</b>\n\n"
             f"Тип: <b>{label}</b>{lang_note}\n\n"
-            f"📎 Отправьте файл в <b>этот чат</b> в течение <b>3 минут</b>,\n"
+            f"📎 Отправьте файл в течение <b>3 минут</b> — прямо в <b>этот чат</b> "
+            f"(до 20 МБ) или через <b>приложение</b> ниже (до 100 МБ, как у Turnitin),\n"
             f"иначе место в очереди освободится и деньги вернутся на баланс.\n\n"
-            f"Форматы: .pdf · .docx · .doc · .txt · .rtf"
+            f"Форматы: .pdf · .docx · .doc · .txt · .rtf",
+            reply_markup=open_app_inline(),
         )
 
     # ── Таймеры ────────────────────────────────────────────────────────────────
@@ -419,9 +422,9 @@ class TurnitinQueueManager:
                 return idx, idx * MINUTES_PER_FILE, len(active)
         return 0, 0, len(active)
 
-    async def _send(self, tg_id: int, text: str):
+    async def _send(self, tg_id: int, text: str, reply_markup=None):
         try:
-            await self.bot.send_message(tg_id, text)
+            await self.bot.send_message(tg_id, text, reply_markup=reply_markup)
         except Exception as e:
             logger.warning("_send failed tg_id=%s: %s", tg_id, e)
 

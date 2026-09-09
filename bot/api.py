@@ -7,6 +7,8 @@ FastAPI — бэкенд для Telegram Mini App.
   GET  /api/prices           — текущие цены Turnitin
   GET  /api/orders           — история заказов пользователя
   GET  /api/packages         — пакеты токенов
+  POST /api/order            — создать заказ Turnitin (списывает баланс, бронь в очереди)
+  POST /api/order/{id}/file  — загрузить файл для заказа в статусе awaiting_file (до 100 МБ)
   POST /api/humanize         — хуманизировать текст (списывает токены)
   POST /api/promo/apply      — активировать промокод (fixed — сразу, percent — превью)
   POST /api/topup            — создать счёт ApiPay на пополнение баланса (Kaspi)
@@ -637,6 +639,63 @@ async def create_order(body: OrderBody, x_telegram_init_data: str = Header(None)
         "balance": round(new_balance, 2),
         "bonus_balance": round(new_bonus, 2),
     }
+
+
+# Turnitin принимает файлы до 100 МБ — это и есть реальный потолок. Через чат
+# бота такое не отправить: облачный Telegram Bot API не отдаёт боту файлы
+# больше 20 МБ (getFile падает "file is too big") вообще без исключений, это
+# ограничение самого Telegram, не наше — см. MAX_FILE_SIZE в handlers/turnitin.py
+# для чат-пути. Тут загрузка идёт обычным HTTP-запросом из Mini App, минуя
+# Telegram полностью, поэтому лимит — только наш собственный.
+MAX_FILE_SIZE_MINIAPP = 100 * 1024 * 1024
+
+
+@app.post("/api/order/{order_id}/file")
+async def upload_order_file(order_id: int, file: UploadFile = File(...),
+                             x_telegram_init_data: str = Header(None)):
+    """Загрузить файл для заказа, ждущего файл (status=awaiting_file) — через
+    Mini App вместо чата бота, чтобы обойти 20-МБ потолок Telegram Bot API.
+    Та же логика приёма/валидации, что и в handlers/turnitin.py::receive_file
+    (переиспользуем её напрямую, чтобы не дублировать и не разъезжаться)."""
+    from services.queue_manager import turnitin_queue
+    from handlers.turnitin import ALLOWED_EXT, _validate_file
+
+    user = await _get_user(x_telegram_init_data)
+    order = await database.get_order(order_id)
+    if not order or order["user_id"] != user["tg_id"]:
+        raise HTTPException(404, "Заказ не найден")
+    if order["status"] != "awaiting_file":
+        raise HTTPException(400, "Заказ сейчас не ждёт файл (истекло время или уже отправлен)")
+
+    fname = (file.filename or "file").lower()
+    ext = Path(fname).suffix
+    if ext not in ALLOWED_EXT:
+        raise HTTPException(400, f"Поддерживаются форматы: {', '.join(sorted(ALLOWED_EXT))}")
+
+    data = await file.read()
+    if len(data) > MAX_FILE_SIZE_MINIAPP:
+        raise HTTPException(400, "Файл слишком большой. Максимум 100 МБ (лимит Turnitin).")
+
+    os.makedirs(settings.UPLOADS_DIR, exist_ok=True)
+    file_path = os.path.join(settings.UPLOADS_DIR, f"{order_id}_{fname}")
+    with open(file_path, "wb") as f:
+        f.write(data)
+
+    ok, err_msg = await _validate_file(file_path, ext, order["report_type"])
+    if not ok:
+        try:
+            os.remove(file_path)
+        except Exception:
+            pass
+        # err_msg — HTML для Telegram (<b>...</b>) — в Mini App показываем как есть без тегов
+        raise HTTPException(400, re.sub(r"<[^>]+>", "", err_msg))
+
+    await database.update_order(order_id, status="ready", file_name=fname, file_path=file_path)
+    await database.clear_pending_action(user["tg_id"])
+    asyncio.create_task(_bot_send(user["tg_id"], "✅ Файл принят через приложение! Обрабатываем в порядке очереди ⏳"))
+    await turnitin_queue.on_file_received(order_id)
+
+    return {"ok": True}
 
 
 class TopupBody(BaseModel):

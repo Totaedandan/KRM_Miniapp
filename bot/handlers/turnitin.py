@@ -32,7 +32,13 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 ALLOWED_EXT = {".pdf", ".docx", ".doc", ".txt", ".rtf"}
-MAX_FILE_SIZE = 40 * 1024 * 1024  # 40 MB
+# Облачный Telegram Bot API не отдаёт боту файлы больше 20 МБ (getFile падает
+# "file is too big") — это ограничение самого Telegram, поднять нельзя без
+# своего локального Bot API сервера. Turnitin принимает до 100 МБ — для файлов
+# больше 20 МБ юзера направляем на загрузку через Mini App (см. api.py
+# POST /api/order/{id}/file — тот путь идёт обычным HTTP, лимит Telegram
+# вообще не участвует).
+MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB — потолок Telegram Bot API, не наш
 MIN_WORDS = 300
 
 TYPE_LABEL = {"sim": "📊 Плагиат", "ai": "🤖 AI-детекция", "both": "✨ Оба отчёта"}
@@ -241,7 +247,12 @@ async def receive_file(message: Message, state: FSMContext, bot: Bot):
         await message.answer(f"⚠️ Поддерживаются форматы: {', '.join(ALLOWED_EXT)}")
         return
     if doc.file_size > MAX_FILE_SIZE:
-        await message.answer("⚠️ Файл слишком большой. Максимум 40 МБ.")
+        await message.answer(
+            "⚠️ Файл слишком большой для чата (лимит Telegram — 20 МБ).\n\n"
+            "Загрузите его через приложение — там лимит 100 МБ (как у Turnitin). "
+            "Время на отправку ещё идёт.",
+            reply_markup=main_menu_kb(),
+        )
         return
 
     os.makedirs(settings.UPLOADS_DIR, exist_ok=True)
