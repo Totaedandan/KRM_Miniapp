@@ -81,73 +81,15 @@ FIND_FILLED_BTN_JS = """() => {
     return deepFind(document);
 }"""
 
-# Найти ВСЕ % scores (общий список)
-FIND_SCORES_JS = r"""() => {
-    const res = [];
-    function deepFind(root) {
-        for (const el of root.querySelectorAll('*')) {
-            if (el.shadowRoot) deepFind(el.shadowRoot);
-            if (el.children.length === 0) {
-                const t = el.textContent.trim();
-                if (/^[0-9]+%$/.test(t)) {
-                    const r = el.getBoundingClientRect();
-                    if (r.width > 0) res.push({text: t, x: Math.round(r.x+r.width/2), y: Math.round(r.y+r.height/2)});
-                }
-            }
-        }
-    }
-    deepFind(document);
-    return res;
-}"""
-
-# Найти кнопку Similarity-отчёта: числовой %, самый ЛЕВЫЙ (наименьший x) — similarity всегда первая колонка
-# ── СТАРЫЕ глобальные селекторы (резервные fallback) ─────────────────────────
-FIND_SIM_SCORE_JS = r"""() => {
-    const all = [];
-    function deepFind(root) {
-        for (const el of root.querySelectorAll('*')) {
-            if (el.shadowRoot) deepFind(el.shadowRoot);
-            if (el.children.length === 0) {
-                const t = el.textContent.trim();
-                if (/^[0-9]+%$/.test(t)) {
-                    const r = el.getBoundingClientRect();
-                    if (r.width > 0) all.push({text: t, x: Math.round(r.x+r.width/2), y: Math.round(r.y+r.height/2)});
-                }
-            }
-        }
-    }
-    deepFind(document);
-    if (!all.length) return null;
-    // Similarity — всегда крайняя ЛЕВАЯ колонка (наименьший x)
-    return all.reduce((a, b) => a.x < b.x ? a : b);
-}"""
-
-# Найти кнопку AI Writing-отчёта: *% (0% AI) ИЛИ самый ПРАВЫЙ числовой % (AI — вторая колонка)
-FIND_AI_SCORE_JS = r"""() => {
-    const all = [];
-    function deepFind(root) {
-        for (const el of root.querySelectorAll('*')) {
-            if (el.shadowRoot) deepFind(el.shadowRoot);
-            if (el.children.length === 0) {
-                const t = el.textContent.trim();
-                if (t === '*%' || /^[0-9]+%$/.test(t)) {
-                    const r = el.getBoundingClientRect();
-                    if (r.width > 0) all.push({text: t, x: Math.round(r.x+r.width/2), y: Math.round(r.y+r.height/2)});
-                }
-            }
-        }
-    }
-    deepFind(document);
-    if (!all.length) return null;
-    // *% — уникально для AI Writing, всегда берём его первым
-    const star = all.find(s => s.text === '*%');
-    if (star) return star;
-    // Несколько числовых %: AI-колонка всегда ПРАВЕЕ similarity (наибольший x)
-    return all.reduce((a, b) => a.x > b.x ? a : b);
-}"""
-
-# ── УМНЫЙ селектор: ищет % только в строке с нужным Order_<id> ───────────────
-# Используется как основной; старые JS остаются как fallback если title не найден.
+# ── Селектор: ищет % ТОЛЬКО в строке с нужным Order_<id> ─────────────────────
+# Раньше был ещё позиционный fallback (leftmost/rightmost % на всей странице)
+# на случай если title не нашёлся в DOM — убран после реального инцидента:
+# заказ #161 получил PDF-отчёт заказа #160, потому что #160 упал во время
+# polling (см. _get_report) ДО вызова _delete(), его сабмишен остался висеть
+# в assignment, и позиционный fallback для #161 схватил чужую (более старую)
+# строку вместо ожидания своей. Теперь без точного совпадения по title —
+# отчёт не скачивается, только ждём/уходим в timeout (см. _is_report_ready,
+# _download_report). Угадывать чужой файл опаснее, чем упасть по таймауту.
 FIND_SCORE_IN_ROW_JS = r"""(args) => {
     // args = { orderTitle: "Order_123", rtype: "similarity"|"ai" }
     const { orderTitle, rtype } = args;
@@ -534,6 +476,18 @@ class TurnitinService:
                 return sim_path, ai_path
 
             except Exception:
+                # Best-effort: даже при сбое пробуем удалить сабмишен с Turnitin.
+                # Если этого не сделать, он остаётся висеть в assignment навсегда
+                # и засоряет строки для будущих заказов — именно так возник
+                # реальный инцидент (заказ #161 получил отчёт заказа #160,
+                # у которого упал polling и _delete() ни разу не вызвался).
+                # Если страница/браузер уже мертвы (то самое "Target page...
+                # closed") — попытка тоже упадёт, это ОК, глотаем и идём дальше
+                # с исходной ошибкой.
+                try:
+                    await self._delete(page)
+                except Exception:
+                    pass
                 raise
             finally:
                 # ctx.close может упасть если браузер уже закрылся — игнорируем
@@ -752,13 +706,16 @@ class TurnitinService:
         logger.info("File attached")
         await asyncio.sleep(2)
 
-        # Заголовок
-        try:
-            title_input = await lti.query_selector('input[type="text"]')
-            if title_input:
-                await title_input.fill(f"Order_{order_id}")
-        except Exception as e:
-            logger.warning("Title fill failed: %s", e)
+        # Заголовок — критично: по нему потом ищем СВОЮ строку среди возможных
+        # чужих/осиротевших сабмишенов в assignment (FIND_SCORE_IN_ROW_JS).
+        # Раньше сбой здесь только логировался — сабмишен без title потом было
+        # невозможно надёжно отличить от чужого. Падаем сразу (TurnitinError —
+        # retryable в process()), лучше повторить попытку, чем рисковать
+        # скачать чужой отчёт.
+        title_input = await lti.query_selector('input[type="text"]')
+        if not title_input:
+            raise TurnitinError("Не найдено поле заголовка сабмишена (Order_<id>)")
+        await title_input.fill(f"Order_{order_id}")
         await asyncio.sleep(1)
 
         # Upload and Preview
@@ -843,9 +800,11 @@ class TurnitinService:
         """
         Similarity: ждём числовой% в строке Order_<id>.
         AI Writing: ждём *% или числовой% в строке Order_<id>.
-        Используем FIND_SCORE_IN_ROW_JS (привязка к title) чтобы не перепутать
-        строки при наличии старых сабмитов в assignment.
-        Если title не найден в DOM — падаем обратно на глобальные селекторы.
+        Строго по FIND_SCORE_IN_ROW_JS (привязка к title) — НЕ падаем на
+        позиционный fallback по всей странице, иначе рискуем принять за
+        готовый чужой (осиротевший) сабмишен в том же assignment. Если title
+        ещё не в DOM — просто "не готово", polling в _get_report продолжит
+        ждать (и в итоге уйдёт в TurnitinError по таймауту, если что-то не так).
         """
         order_title = f"Order_{order_id}" if order_id else ""
         score = await lti.evaluate(FIND_SCORE_IN_ROW_JS, {"orderTitle": order_title, "rtype": rtype})
@@ -853,22 +812,16 @@ class TurnitinService:
             if rtype == "ai":
                 logger.info("AI Writing score found (row-based): '%s'", score.get('text'))
             return True
-        # Fallback: старые глобальные селекторы (если title не отрендерился)
-        if rtype == "similarity":
-            return await lti.evaluate(FIND_SIM_SCORE_JS) is not None
-        else:
-            fb = await lti.evaluate(FIND_AI_SCORE_JS)
-            if fb:
-                logger.info("AI Writing score found (fallback): '%s'", fb.get('text'))
-            return fb is not None
+        return False
 
     async def _download_report(self, page, lti, rtype: str, out_path: Path,
                                 order_id: int = 0) -> Optional[str]:
         """Кликаем на правильный % для типа отчёта → ловим новую страницу → Download → PDF.
 
-        Основной путь: FIND_SCORE_IN_ROW_JS — ищет % в строке с title Order_<id>.
-        Это исключает скачивание чужого отчёта если старые сабмиты не удалились.
-        Fallback: старые глобальные селекторы (FIND_SIM_SCORE_JS / FIND_AI_SCORE_JS).
+        Строго по FIND_SCORE_IN_ROW_JS — ищет % в строке с title Order_<id>,
+        без позиционного fallback на весь документ (см. комментарий у
+        FIND_SCORE_IN_ROW_JS: раньше такой fallback реально привёл к скачиванию
+        чужого отчёта, если старый сабмит не удалился из assignment).
         """
         report_page = None
         try:
@@ -879,16 +832,12 @@ class TurnitinService:
             order_title = f"Order_{order_id}" if order_id else ""
             pct = await lti.evaluate(FIND_SCORE_IN_ROW_JS, {"orderTitle": order_title, "rtype": rtype})
 
-            # Fallback на глобальные селекторы если title не нашли в DOM
             if not pct:
-                logger.warning("Row-based score not found for order %s rtype=%s — using fallback", order_id, rtype)
-                if rtype == "similarity":
-                    pct = await lti.evaluate(FIND_SIM_SCORE_JS)
-                else:
-                    pct = await lti.evaluate(FIND_AI_SCORE_JS)
-
-            if not pct:
-                logger.warning("Score button not found for rtype=%s order=%s", rtype, order_id)
+                # Раньше тут был позиционный fallback на весь документ — убран
+                # (см. комментарий у FIND_SCORE_IN_ROW_JS): без точного
+                # совпадения по title рискуем скачать чужой отчёт. Просто не
+                # скачиваем — _get_report продолжит поллинг/уйдёт в timeout.
+                logger.warning("Row-based score not found for order %s rtype=%s — skipping (no unsafe fallback)", order_id, rtype)
                 return None
 
             is_star = pct.get('text') == '*%'
@@ -1100,6 +1049,16 @@ class TurnitinService:
           2. Удалить старые файлы из uploads/ (>1ч) и reports/ (>24ч)
           Файлы из protected_paths (заказы в очереди/в работе) НЕ удаляются.
           Браузер запустится заново автоматически при следующем заказе.
+
+        `self._lock` держится всё время активного заказа (process → _process_once,
+        логин+загрузка+поллинг+скачивание — может идти много минут). Раньше
+        cleanup() ждал `async with self._lock` терпеливо и, если заказ реально
+        завис (та же причина, по которой админ вообще жмёт "Очистка"), кнопка
+        крутилась бесконечно — сам смысл экстренной очистки пропадал. Теперь
+        ждём лок недолго, а если не дождались — закрываем браузер ПРИНУДИТЕЛЬНО
+        (без лока). Активный `_process_once` словит на этом "Target page...
+        closed", упадёт с ошибкой (не retryable — но у заказа уже есть 3 попытки
+        и ручной возврат админом) — это ожидаемая цена честного "убей и почисти".
         """
         import shutil, glob, time, os as _os
 
@@ -1107,12 +1066,21 @@ class TurnitinService:
 
         result = {
             "browser_restarted": False,
+            "forced": False,
             "deleted_uploads": 0,
             "deleted_reports": 0,
             "freed_bytes": 0,
         }
 
-        async with self._lock:
+        acquired = True
+        try:
+            await asyncio.wait_for(self._lock.acquire(), timeout=5)
+        except asyncio.TimeoutError:
+            acquired = False
+            result["forced"] = True
+            logger.warning("Cleanup: lock busy (заказ в процессе) — закрываем браузер принудительно")
+
+        try:
             try:
                 if self._browser and self._browser.is_connected():
                     await self._browser.close()
@@ -1124,6 +1092,9 @@ class TurnitinService:
                 logger.info("Cleanup: browser closed, playwright stopped")
             except Exception as e:
                 logger.warning(f"Cleanup browser error: {e}")
+        finally:
+            if acquired:
+                self._lock.release()
 
         if uploads_dir and _os.path.isdir(uploads_dir):
             cutoff = time.time() - 3600

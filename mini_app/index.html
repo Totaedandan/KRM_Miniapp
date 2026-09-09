@@ -445,7 +445,7 @@ function HomeScreen({ user, orders, onNav }) {
       <div className="sec-title">Сервисы</div>
       {[
         { nav:'turnitin',  icon:'scan', title:'Turnitin',   sub:'Плагиат и AI-детекция' },
-        { nav:'humanizer', icon:'wand', title:'Хуманайзер', sub:'AI-текст в человеческий' },
+        { nav:'humanizer', icon:'wand', title:'Редактор текста', sub:'Стилизация и редактирование текста' },
         { nav:'rental',    icon:'key',  title:'Аренда ИИ',  sub:'ChatGPT, Claude и другие' },
       ].map(s => (
         <button key={s.nav} className="svc-card" onClick={() => onNav(s.nav)}>
@@ -664,8 +664,8 @@ function HumanizerScreen({ user, onNav, onBalanceUpdate }) {
     <div className="screen">
       <Toast msg={toast}/>
       <button className="back-btn" onClick={() => onNav('home')}>{ICONS.back} Назад</button>
-      <h2 style={{marginBottom:4}}>Хуманайзер</h2>
-      <p style={{marginBottom:16}}>Делаю ИИ-тексты неотличимыми от человеческих.</p>
+      <h2 style={{marginBottom:4}}>Редактор текста</h2>
+      <p style={{marginBottom:16}}>Приведу ваш текст в подобающий вид.</p>
 
       <div className="card" style={{marginBottom:14}}>
         <div style={{display:'flex',justifyContent:'space-between',fontSize:13}}>
@@ -2269,7 +2269,10 @@ function AdminScreen({ toast }) {
   if (view === 'cleanup') {
     const doClean = async () => {
       setCleaning(true);
-      try { const d = await api('/api/admin/cleanup', { method:'POST' }); toast(`Удалено: uploads=${d.deleted_uploads} reports=${d.deleted_reports}`); }
+      try {
+        const d = await api('/api/admin/cleanup', { method:'POST' });
+        toast(`Удалено: uploads=${d.deleted_uploads} reports=${d.deleted_reports}` + (d.forced ? ' · заказ в процессе был прерван' : ''));
+      }
       catch(e) { toast('Ошибка: '+e.message); } finally { setCleaning(false); }
     };
     return (
