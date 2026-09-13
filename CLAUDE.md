@@ -49,6 +49,16 @@ API: `POST /api/order` (поле `is_premium`), `GET /api/admin/queue`, `POST /a
 
 Константы: `PREMIUM_MULTIPLIER=1.5`, `FILE_TIMEOUT_SEC=180`, `MINUTES_PER_FILE=7`.
 
+**Отмена заказа, который прямо сейчас `processing` (РЕАЛИЗОВАНО):** `cancel_order()`
+не просто флипает статус в БД — если `order_id` совпадает с `_main_busy_order`/
+`_overflow_busy_order`, реально прерывает (`task.cancel()` + `await`) фоновую
+`_run_turnitin`-задачу этого слота и ждёт её `finally` (освобождение слота)
+перед тем как отвечать. Раньше без этого фоновая задача не знала об отмене и
+висела до своих 60 мин (`PROCESS_TIMEOUT_SEC`), всё это время слот считался
+занятым — следующие `ready`-заказы просто простаивали, выглядело как «после
+отмены остальные виснут» и «таймаут не работает» (по факту это была одна и
+та же проблема — orphaned task, а не два разных бага).
+
 **Приём файла — два пути (РЕАЛИЗОВАНО):**
 1. Чат бота (`handlers/turnitin.py::receive_file`) — `bot.get_file`/`download_file`,
    лимит **20 МБ** (жёсткий потолок облачного Telegram Bot API, `getFile` для
