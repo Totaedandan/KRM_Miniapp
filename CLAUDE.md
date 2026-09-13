@@ -130,16 +130,27 @@ Turnitin.
   логинится, либо видит код на странице сам — как это делают конкуренты.
   Намеренно нет обратного отсчёта "истекает через X" — точный TTL magic-link
   у Claude не задокументирован, выдумывать цифру рискованно.
-- **Авто-разлогин**: `services/ai_rental_service.py` — Playwright, **новый
-  browser/context на каждую задачу** (не персистентный браузер, как у Turnitin),
-  `proxy={...}` привязан к прокси конкретного аккаунта. `auto_logout(account,
-  service_type, proxy_url)` логинится по сохранённым `cookies_data` →
-  `chatgpt.com/#settings` / `claude.ai/settings/account` → «Log out of all
-  devices/sessions». `service_type` берётся из `rental_services.icon`
+- **Авто-разлогин (РЕАЛИЗОВАНО, работает)**: `services/ai_rental_service.py` —
+  Playwright, **новый browser/context на каждую задачу** (не персистентный
+  браузер, как у Turnitin), `proxy={...}` привязан к прокси конкретного
+  аккаунта. `auto_logout(account, service_type, proxy_url)` логинится **сам**
+  тем же путём, что арендатор — email+OTP (`_login_via_otp_chatgpt`/
+  `_login_via_otp_claude`, код ждётся через тот же `otp_incoming_codes`, что и
+  у `/api/rental/otp`) — затем `chatgpt.com/#settings` /
+  `claude.ai/settings/account` → «Log out of all devices/sessions». `cookies_data`
+  в схеме `ai_accounts` — легаси-колонка, нигде в текущем коде не читается и не
+  пишется (единственный секрет на аккаунте на практике — сам email на нашем
+  домене, вход по коду). `service_type` берётся из `rental_services.icon`
   (`openai`→chatgpt, `claude`→claude) — другие сервисы (grok/notion/figma/…)
-  авто-разлогин пока не поддерживают, уходят в `maintenance` для ручного разбора.
-  **Селекторы — первая версия**, потребуют донастройки на реальных страницах
-  (как было с Turnitin).
+  авто-разлогин не поддерживают, уходят в `maintenance` для ручного разбора.
+  Реальный найденный баг (сент. 2026): `get_by_text("Continue", exact=False)`
+  на логин-странице Claude подхватывал `"Continue with Google"` (OAuth-кнопка)
+  раньше обычной `"Continue"` — везде заменено на `exact=True`.
+  claude.ai/chatgpt.com иногда (вероятностно, независимо от прокси) отдают
+  Cloudflare Turnstile вместо формы логина — та же природа, что и в кейсе
+  magic-link выше; `ai_rental_manager._run_logout` даёт `auto_logout` до
+  `LOGOUT_MAX_ATTEMPTS=3` честных попыток с нуля (пауза `LOGOUT_RETRY_DELAY_SEC=15`)
+  прежде чем уйти в `maintenance`.
 - **Воркер** `services/ai_rental_manager.py` (заменил `rental_manager.py`, старт
   из `main.py`): тик 60с — напоминания (~30 мин), истечение (`ai_rentals` →
   `expired` сразу + `logout_account()` в фоне), cooldown→available через
@@ -153,8 +164,9 @@ Turnitin.
   (общий каталог), `/api/admin/ai/proxies[/delete]`,
   `/api/admin/ai/accounts[/update|/delete|/force_logout]`, `/api/admin/ai/otp_logs`,
   `/api/admin/rental/orders|cancel`. Whitelist-бесплатно НЕТ — платят все.
-- **Пароли не хранятся** — вход только через email+OTP, поэтому `cookies_data`
-  (сессия) — единственный секрет на аккаунте, не логировать/не отдавать из каталога.
+- **Пароли не хранятся** — вход (и арендатора, и бота при авто-разлогине)
+  только через email+OTP; email на нашем домене — единственный секрет на
+  аккаунте, не отдавать из каталога.
 - Smoke-тест слоя БД: `python _test_ai_rental_db.py` (прокси-guard, LRU-выбор,
   бонус+тенге списание/возврат, идемпотентность, cooldown-окно).
 
