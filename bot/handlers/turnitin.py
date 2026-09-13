@@ -13,7 +13,6 @@
 
 import asyncio
 import logging
-import os
 from pathlib import Path
 
 from aiogram import Router, F, Bot
@@ -31,14 +30,7 @@ from services.queue_manager import turnitin_queue
 logger = logging.getLogger(__name__)
 router = Router()
 
-ALLOWED_EXT = {".pdf", ".docx", ".doc", ".txt", ".rtf"}
-# Облачный Telegram Bot API не отдаёт боту файлы больше 20 МБ (getFile падает
-# "file is too big") — это ограничение самого Telegram, поднять нельзя без
-# своего локального Bot API сервера. Turnitin принимает до 100 МБ — для файлов
-# больше 20 МБ юзера направляем на загрузку через Mini App (см. api.py
-# POST /api/order/{id}/file — тот путь идёт обычным HTTP, лимит Telegram
-# вообще не участвует).
-MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB — потолок Telegram Bot API, не наш
+ALLOWED_EXT = {".pdf", ".docx", ".doc", ".txt", ".rtf"}  # используется и здесь, и api.py (Mini App upload)
 MIN_WORDS = 300
 
 TYPE_LABEL = {"sim": "📊 Плагиат", "ai": "🤖 AI-детекция", "both": "✨ Оба отчёта"}
@@ -217,9 +209,14 @@ async def receive_kaspi_receipt(message: Message, state: FSMContext, bot: Bot):
 
 
 # ── Приём файла (когда заказ в статусе awaiting_file) ────────────────────────
+# Файл через чат бота больше НЕ принимается — только через Mini App
+# (POST /api/order/{id}/file, до 100 МБ, см. api.py). Раньше файл в чате
+# тоже принимался (до 20 МБ, лимит Telegram Bot API) — юзеров это путало
+# (два параллельных способа отправить один и тот же файл), поэтому чат
+# теперь только объясняет, что нужно приложение, сам файл не трогает.
 
 @router.message(F.document)
-async def receive_file(message: Message, state: FSMContext, bot: Bot):
+async def receive_file(message: Message, state: FSMContext):
     """Срабатывает, когда контроллер очереди запросил файл (pending_action=waiting_file)."""
     if await state.get_state() is not None:
         return  # активен другой FSM-флоу (Kaspi-чек, хуманайзер и т.п.)
@@ -229,8 +226,7 @@ async def receive_file(message: Message, state: FSMContext, bot: Bot):
         return
 
     pdata = pending.get("data", {})
-    order_id    = pdata.get("order_id")
-    report_type = pdata.get("report_type", "both")
+    order_id = pdata.get("order_id")
     if not order_id:
         return
 
@@ -240,42 +236,13 @@ async def receive_file(message: Message, state: FSMContext, bot: Bot):
         await db.clear_pending_action(message.from_user.id)
         return
 
-    doc: Document = message.document
-    fname = (doc.file_name or "file").lower()
-    ext   = Path(fname).suffix
-    if ext not in ALLOWED_EXT:
-        await message.answer(f"⚠️ Поддерживаются форматы: {', '.join(ALLOWED_EXT)}")
-        return
-    if doc.file_size > MAX_FILE_SIZE:
-        await message.answer(
-            "⚠️ Файл слишком большой для чата (лимит Telegram — 20 МБ).\n\n"
-            "Загрузите его через приложение — там лимит 100 МБ (как у Turnitin). "
-            "Время на отправку ещё идёт.",
-            reply_markup=main_menu_kb(),
-        )
-        return
-
-    os.makedirs(settings.UPLOADS_DIR, exist_ok=True)
-    file = await bot.get_file(doc.file_id)
-    downloaded = await bot.download_file(file.file_path)
-    file_path = os.path.join(settings.UPLOADS_DIR, f"{order_id}_{fname}")
-    with open(file_path, "wb") as f:
-        f.write(downloaded.read())
-
-    ok, err_msg = await _validate_file(file_path, ext, report_type)
-    if not ok:
-        try:
-            os.remove(file_path)
-        except Exception:
-            pass
-        await message.answer(err_msg)  # остаётся время дослать корректный файл
-        return
-
-    await db.update_order(order_id, status="ready", file_name=fname, file_path=file_path)
-    await db.clear_pending_action(message.from_user.id)
-    await message.answer("✅ Файл принят! Обрабатываем в порядке очереди ⏳",
-                         reply_markup=main_menu_kb())
-    await turnitin_queue.on_file_received(order_id)
+    await message.answer(
+        f"📎 Файл для заказа #{order_id} принимается только через <b>приложение</b> — "
+        f"в чат его отправлять не нужно.\n\n"
+        f"Откройте приложение кнопкой ниже — сверху появится баннер с загрузкой. "
+        f"Время на отправку ещё идёт.",
+        reply_markup=main_menu_kb(),
+    )
 
 
 async def _validate_file(file_path: str, ext: str, report_type: str) -> tuple[bool, str]:

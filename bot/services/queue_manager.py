@@ -254,8 +254,8 @@ class TurnitinQueueManager:
         await self._send(order["user_id"],
             f"{prefix} #{order_id}</b>\n\n"
             f"Тип: <b>{label}</b>{lang_note}\n\n"
-            f"📎 Отправьте файл в течение <b>3 минут</b> — прямо в <b>этот чат</b> "
-            f"(до 20 МБ) или через <b>приложение</b> ниже (до 100 МБ, как у Turnitin),\n"
+            f"📎 Загрузите файл в течение <b>3 минут</b> через <b>приложение</b> ниже "
+            f"(до 100 МБ, как у Turnitin) — <b>в чат файл слать не нужно</b>,\n"
             f"иначе место в очереди освободится и деньги вернутся на баланс.\n\n"
             f"Форматы: .pdf · .docx · .doc · .txt · .rtf",
             reply_markup=open_app_inline(),
