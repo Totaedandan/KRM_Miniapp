@@ -41,6 +41,14 @@ TICK_SEC = 60
 REMINDER_MIN = 30
 COOLDOWN_MIN = 5
 PROXY_GAP_SEC = 20
+# claude.ai/chatgpt.com иногда отдают серверным/прокси IP Cloudflare Turnstile
+# ("Performing security verification") вместо формы логина — вероятностно, не
+# на каждой попытке (подтверждено вживую: 2я попытка подряд с тем же прокси
+# может пройти там, где 1я упёрлась в челлендж). Даём auto_logout несколько
+# честных попыток с нуля (новый browser/context на каждую — уже так устроено
+# внутри auto_logout) прежде чем сдаться и уйти в maintenance.
+LOGOUT_MAX_ATTEMPTS = 3
+LOGOUT_RETRY_DELAY_SEC = 15
 
 ICON_TO_SERVICE_TYPE = {"openai": "chatgpt", "claude": "claude"}
 
@@ -156,11 +164,19 @@ class AiRentalManager:
                 "ai_account #%s: авто-разлогин не поддерживается для этого сервиса "
                 "(icon=%r) — нужен ручной разбор", account["id"], account.get("service_id"))
             return False
-        try:
-            return await ai_rental_service.auto_logout(account, service_type, proxy_url)
-        except Exception as e:
-            logger.error("auto_logout crashed for account #%s: %s", account["id"], e, exc_info=True)
-            return False
+
+        for attempt in range(1, LOGOUT_MAX_ATTEMPTS + 1):
+            try:
+                if await ai_rental_service.auto_logout(account, service_type, proxy_url):
+                    return True
+            except Exception as e:
+                logger.error("auto_logout crashed for account #%s (попытка %d/%d): %s",
+                             account["id"], attempt, LOGOUT_MAX_ATTEMPTS, e, exc_info=True)
+            if attempt < LOGOUT_MAX_ATTEMPTS:
+                logger.warning("ai_account #%s: попытка разлогина %d/%d не удалась — повтор через %ds",
+                                account["id"], attempt, LOGOUT_MAX_ATTEMPTS, LOGOUT_RETRY_DELAY_SEC)
+                await asyncio.sleep(LOGOUT_RETRY_DELAY_SEC)
+        return False
 
     async def _alert_admin(self, account: dict, service_type: str | None):
         from config import settings

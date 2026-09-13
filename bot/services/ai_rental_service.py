@@ -137,7 +137,13 @@ async def _login_via_otp_chatgpt(page: Page, email: str) -> bool:
     try:
         email_input = page.locator('input[type="email"], input[name="email"], #email-input')
         await email_input.first.fill(email, timeout=10000)
-        await page.get_by_text("Continue", exact=False).first.click(timeout=8000)
+        # exact=True — иначе на страницах с OAuth-кнопками ("Continue with
+        # Google"/Apple/Microsoft) get_by_text подстрочным поиском находит ИХ
+        # раньше обычной "Continue" (email/код) и кликает не туда. Реальный
+        # инцидент: Claude сейчас показывает "Continue with Google" ПЕРЕД
+        # обычной кнопкой — .first хватал именно OAuth-вариант, click падал
+        # ("element is not enabled"), а дальше срабатывал Cloudflare-челлендж.
+        await page.get_by_text("Continue", exact=True).first.click(timeout=8000)
     except Exception as e:
         await _debug_shot(page, "chatgpt_email_step")
         logger.warning(f"ChatGPT {email}: не удалось ввести email: {e}")
@@ -163,7 +169,13 @@ async def _login_via_otp_chatgpt(page: Page, email: str) -> bool:
     try:
         code_input = page.locator('input[type="text"], input[inputmode="numeric"], input[name*="code" i]')
         await code_input.first.fill(code, timeout=8000)
-        await page.get_by_text("Continue", exact=False).first.click(timeout=8000)
+        # exact=True — иначе на страницах с OAuth-кнопками ("Continue with
+        # Google"/Apple/Microsoft) get_by_text подстрочным поиском находит ИХ
+        # раньше обычной "Continue" (email/код) и кликает не туда. Реальный
+        # инцидент: Claude сейчас показывает "Continue with Google" ПЕРЕД
+        # обычной кнопкой — .first хватал именно OAuth-вариант, click падал
+        # ("element is not enabled"), а дальше срабатывал Cloudflare-челлендж.
+        await page.get_by_text("Continue", exact=True).first.click(timeout=8000)
     except Exception as e:
         await _debug_shot(page, "chatgpt_code_step")
         logger.warning(f"ChatGPT {email}: не удалось ввести код: {e}")
@@ -183,7 +195,13 @@ async def _login_via_otp_claude(page: Page, email: str) -> bool:
     try:
         email_input = page.locator('input[type="email"], input[name="email"]')
         await email_input.first.fill(email, timeout=10000)
-        await page.get_by_text("Continue", exact=False).first.click(timeout=8000)
+        # exact=True — иначе на страницах с OAuth-кнопками ("Continue with
+        # Google"/Apple/Microsoft) get_by_text подстрочным поиском находит ИХ
+        # раньше обычной "Continue" (email/код) и кликает не туда. Реальный
+        # инцидент: Claude сейчас показывает "Continue with Google" ПЕРЕД
+        # обычной кнопкой — .first хватал именно OAuth-вариант, click падал
+        # ("element is not enabled"), а дальше срабатывал Cloudflare-челлендж.
+        await page.get_by_text("Continue", exact=True).first.click(timeout=8000)
     except Exception as e:
         await _debug_shot(page, "claude_email_step")
         logger.warning(f"Claude {email}: не удалось ввести email: {e}")
@@ -199,7 +217,13 @@ async def _login_via_otp_claude(page: Page, email: str) -> bool:
     try:
         code_input = page.locator('input[type="text"], input[inputmode="numeric"]')
         await code_input.first.fill(code, timeout=8000)
-        await page.get_by_text("Continue", exact=False).first.click(timeout=8000)
+        # exact=True — иначе на страницах с OAuth-кнопками ("Continue with
+        # Google"/Apple/Microsoft) get_by_text подстрочным поиском находит ИХ
+        # раньше обычной "Continue" (email/код) и кликает не туда. Реальный
+        # инцидент: Claude сейчас показывает "Continue with Google" ПЕРЕД
+        # обычной кнопкой — .first хватал именно OAuth-вариант, click падал
+        # ("element is not enabled"), а дальше срабатывал Cloudflare-челлендж.
+        await page.get_by_text("Continue", exact=True).first.click(timeout=8000)
     except Exception as e:
         await _debug_shot(page, "claude_code_step")
         logger.warning(f"Claude {email}: не удалось ввести код: {e}")
