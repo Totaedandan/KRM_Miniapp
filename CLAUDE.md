@@ -59,25 +59,27 @@ API: `POST /api/order` (поле `is_premium`), `GET /api/admin/queue`, `POST /a
 отмены остальные виснут» и «таймаут не работает» (по факту это была одна и
 та же проблема — orphaned task, а не два разных бага).
 
-**Приём файла — два пути (РЕАЛИЗОВАНО):**
-1. Чат бота (`handlers/turnitin.py::receive_file`) — `bot.get_file`/`download_file`,
-   лимит **20 МБ** (жёсткий потолок облачного Telegram Bot API, `getFile` для
-   файлов больше падает "file is too big" — не поднять без своего локального
-   Bot API сервера).
-2. Mini App (`POST /api/order/{id}/file`, multipart) — обычный HTTP на свой
-   backend, Telegram в передаче не участвует, лимит **100 МБ** (реальный
-   потолок самого Turnitin). Переиспользует `ALLOWED_EXT`/`_validate_file` из
-   `handlers/turnitin.py` — валидация (мин/макс слов, английский для
-   AI-детекции) одна на оба пути, разница только в транспорте.
+**Приём файла — только Mini App (РЕАЛИЗОВАНО):** `POST /api/order/{id}/file`
+(multipart) — обычный HTTP на свой backend, Telegram в передаче не участвует,
+лимит **100 МБ** (реальный потолок самого Turnitin). Использует
+`ALLOWED_EXT`/`_validate_file` из `handlers/turnitin.py` (мин/макс слов,
+английский для AI-детекции).
 
-Оба пути завершаются одинаково: `update_order(status="ready", ...)` +
-`clear_pending_action` + `turnitin_queue.on_file_received(order_id)`. Таймер
-на 3 минуты (`FILE_TIMEOUT_SEC`) общий и живёт только в памяти воркера — для
-Mini App дедлайн считается на фронте как `updated_at + 180с` (колонка
-`turnitin_orders.updated_at` уже обновляется в момент перехода в
-`awaiting_file`, отдельного поля под дедлайн заводить не пришлось). Баннер
-`AwaitingFileBanner` в Mini App виден на любой вкладке, пока у юзера есть
-заказ в `awaiting_file` — не только на экране Turnitin.
+Раньше файл принимался ещё и в чате бота (`bot.get_file`/`download_file`,
+лимит 20 МБ — жёсткий потолок облачного Telegram Bot API, не поднять без
+своего локального Bot API сервера) — убрано: два параллельных способа
+отправить один и тот же файл путали юзеров. `handlers/turnitin.py::receive_file`
+теперь на входящий документ только отвечает, что файл принимается лишь через
+приложение, ничего не скачивает и не трогает статус заказа.
+
+Завершение: `update_order(status="ready", ...)` + `clear_pending_action` +
+`turnitin_queue.on_file_received(order_id)`. Таймер на 3 минуты
+(`FILE_TIMEOUT_SEC`) живёт только в памяти воркера — на фронте дедлайн
+считается как `updated_at + 180с` (колонка `turnitin_orders.updated_at` уже
+обновляется в момент перехода в `awaiting_file`, отдельного поля под дедлайн
+заводить не пришлось). Баннер `AwaitingFileBanner` в Mini App виден на любой
+вкладке, пока у юзера есть заказ в `awaiting_file` — не только на экране
+Turnitin.
 
 ## Аренда ИИ-аккаунтов v2 (РЕАЛИЗОВАНО — email+OTP, авто-разлогин, прокси-группы)
 
