@@ -68,6 +68,15 @@ class TurnitinQueueManager:
         # id заказа, занимающего основной/overflow слот прямо сейчас (или None)
         self._main_busy_order: Optional[int] = None
         self._overflow_busy_order: Optional[int] = None
+        # Сами asyncio-задачи этих слотов — нужны, чтобы cancel_order() мог
+        # реально прервать фоновую обработку, если отменяют заказ, который уже
+        # 'processing' (не только 'queued'/'awaiting_file'). Без этого запись в
+        # БД флипалась в cancelled, а фоновая _run_turnitin продолжала висеть в
+        # Turnitin-е до 60 мин (PROCESS_TIMEOUT_SEC) — слот считался занятым всё
+        # это время, и следующие заказы простаивали в 'ready', не дожидаясь
+        # диспетчера.
+        self._main_busy_task: Optional[asyncio.Task] = None
+        self._overflow_busy_task: Optional[asyncio.Task] = None
 
     # ── Запуск ────────────────────────────────────────────────────────────────
 
@@ -138,6 +147,29 @@ class TurnitinQueueManager:
         """Отменить заказ с возвратом денег. Используется админом и по таймауту."""
         from database import db as database
         self._cancel_timer(order_id)
+
+        # Если заказ прямо сейчас 'processing' (занимает основной/overflow
+        # слот) — простого UPDATE статуса в БД недостаточно: фоновая
+        # _run_turnitin ничего не узнает и провисит в Turnitin-е до своих 60
+        # минут (PROCESS_TIMEOUT_SEC), всё это время слот будет считаться
+        # занятым, а следующие заказы — простаивать в 'ready', так и не
+        # дождавшись диспетчера. Реально прерываем задачу и ждём, пока её
+        # finally (закрытие браузера, освобождение слота) отработает — тогда
+        # слот гарантированно свободен уже к моменту, когда отдаём ответ.
+        task = None
+        if order_id == self._main_busy_order:
+            task = self._main_busy_task
+        elif order_id == self._overflow_busy_order:
+            task = self._overflow_busy_task
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning("cancel_order: обработка прерванного заказа %s упала: %s", order_id, e)
+
         result = await database.cancel_order_with_refund(order_id, reason=reason)
         if result.get("ok"):
             await database.clear_pending_action(result["user_id"])
@@ -289,7 +321,7 @@ class TurnitinQueueManager:
                     if self._main_busy_order is None:
                         self._main_busy_order = job["id"]
                         await database.update_order(job["id"], status="processing")
-                        asyncio.create_task(self._run_turnitin(job, overflow=False))
+                        self._main_busy_task = asyncio.create_task(self._run_turnitin(job, overflow=False))
                         dispatched = True
                         break
                     if is_premium and self._overflow_busy_order is None:
@@ -297,7 +329,7 @@ class TurnitinQueueManager:
                         await database.update_order(job["id"], status="processing")
                         logger.info("Order %s: премиум мимо очереди — отдельный overflow-браузер "
                                     "(основной занят заказом #%s)", job["id"], self._main_busy_order)
-                        asyncio.create_task(self._run_turnitin(job, overflow=True))
+                        self._overflow_busy_task = asyncio.create_task(self._run_turnitin(job, overflow=True))
                         dispatched = True
                         break
 
@@ -406,8 +438,10 @@ class TurnitinQueueManager:
                 except Exception as e:
                     logger.warning("overflow browser cleanup error (order %s): %s", order_id, e)
                 self._overflow_busy_order = None
+                self._overflow_busy_task = None
             else:
                 self._main_busy_order = None
+                self._main_busy_task = None
             self._wakeup.set()
             await self._reevaluate()
 
