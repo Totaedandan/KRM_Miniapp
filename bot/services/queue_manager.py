@@ -6,7 +6,8 @@
   awaiting_file — бот попросил файл, идёт таймер 3 минуты
   ready         — файл получен, ждёт обработки
   processing    — обрабатывается Playwright-ом
-  done/error/cancelled — финальные
+  done/error/cancelled — финальные (error — сбой обработки, деньги уже
+                  возвращены на баланс юзера, см. _fail_and_refund)
 
 Логика (по схеме клиента):
   • Премиум (×1.5): место бронируется сразу, файл запрашивается немедленно,
@@ -37,14 +38,19 @@ logger = logging.getLogger(__name__)
 
 FILE_TIMEOUT_SEC = 180     # 3 минуты на отправку файла
 MINUTES_PER_FILE = 7       # оценка времени обработки одного файла
-MAX_PROCESS_RETRIES = 3    # макс. авто-повторов обработки (после сбоев/перезапусков)
 # Жёсткий потолок на весь process() (включая внутренние ретраи и 30-минутное
 # ожидание отчёта) — без него зависший без исключения await (например,
 # frame.evaluate() на отсоединившемся LTI-фрейме — нет своего таймаута) вешает
 # воркер НАВСЕГДА: _worker() обрабатывает заказы строго по одному, так что один
 # зависший заказ блокирует и обычную, и премиум очередь целиком, независимо от
 # того, что у них разные class_id/assignment_id в Turnitin.
-PROCESS_TIMEOUT_SEC = 3600  # 60 минут — с запасом даже на полный цикл ретраев
+PROCESS_TIMEOUT_SEC = 900   # 15 минут — по требованию клиента (было 60);
+                            # при срабатывании заказ уходит в error И деньги
+                            # возвращаются сразу же (см. _run_turnitin) — раз
+                            # так, автоповтор после рестарта для error-заказов
+                            # больше не нужен (см. _startup_recover) — иначе
+                            # заказ, уже возвращённый юзеру, мог бы внезапно
+                            # "довыполниться" бесплатно на следующем деплое.
 
 
 @dataclass
@@ -92,13 +98,16 @@ class TurnitinQueueManager:
     async def _startup_recover(self):
         """После рестарта/краха: возобновить обработку очереди по списку.
 
-        - processing → ready: обработка прервалась крахом, повторяем;
-        - awaiting_file → queued: таймеры потеряны, попросим файл заново;
-        - error (файл на месте, повторов < лимита) → ready: заказ упал из-за
-          сбоя инфраструктуры — возобновляем, пока не исчерпан лимит повторов.
-        """
+        - processing → ready: обработка прервалась крахом (сам заказ ещё не
+          провалился, просто оборвался деплоем/рестартом) — повторяем;
+        - awaiting_file → queued: таймеры потеряны, попросим файл заново.
+
+        error НЕ трогаем и не повторяем: с тех пор как _run_turnitin сам
+        возвращает деньги при сбое (см. _fail_and_refund), заказ в error —
+        это уже закрытая, оплаченная обратно история. Если бы мы всё ещё
+        молча пере-пытались его тут после рестарта и попытка вдруг удалась —
+        юзер получил бы услугу бесплатно, деньги-то уже вернулись."""
         from database import db as database
-        import os
         try:
             for o in await database.get_orders_by_status(("processing",)):
                 await database.update_order(o["id"], status="ready")
@@ -106,15 +115,6 @@ class TurnitinQueueManager:
 
             for o in await database.get_orders_by_status(("awaiting_file",)):
                 await database.update_order(o["id"], status="queued")
-
-            for o in await database.get_orders_by_status(("error",)):
-                fp = o.get("file_path")
-                rc = o.get("retry_count") or 0
-                if fp and os.path.exists(fp) and rc < MAX_PROCESS_RETRIES:
-                    await database.update_order(o["id"], status="ready",
-                                                retry_count=rc + 1, error_text=None)
-                    logger.info("Recover: resuming errored order %s (retry %d/%d)",
-                                o["id"], rc + 1, MAX_PROCESS_RETRIES)
 
             await self._reevaluate()
             self._wakeup.set()
@@ -412,23 +412,13 @@ class TurnitinQueueManager:
             # текста, поэтому формируем сообщение явно, иначе error_text пустой.
             logger.error("Turnitin processing timed out for order %s after %ds",
                          order_id, PROCESS_TIMEOUT_SEC)
-            await database.update_order(
-                order_id, status="error",
-                error_text=f"Обработка зависла (>{PROCESS_TIMEOUT_SEC // 60} мин) и была прервана",
-            )
-            support = await database.get_setting("help_username") or "@support"
-            await self._send(tg_id,
-                f"😔 <b>Не удалось получить отчёт.</b>\n"
-                f"Свяжитесь с нами: {support}\nНомер заказа: <b>#{order_id}</b>",
+            await self._fail_and_refund(
+                order_id, tg_id,
+                f"Обработка зависла (>{PROCESS_TIMEOUT_SEC // 60} мин) и была прервана",
             )
         except Exception as e:
             logger.error("Turnitin error order %s: %s", order_id, e, exc_info=True)
-            await database.update_order(order_id, status="error", error_text=str(e)[:500])
-            support = await database.get_setting("help_username") or "@support"
-            await self._send(tg_id,
-                f"😔 <b>Не удалось получить отчёт.</b>\n"
-                f"Свяжитесь с нами: {support}\nНомер заказа: <b>#{order_id}</b>",
-            )
+            await self._fail_and_refund(order_id, tg_id, str(e)[:500])
         finally:
             if overflow_service is not None:
                 # Временный overflow-браузер — закрываем сразу, он больше не нужен
@@ -444,6 +434,25 @@ class TurnitinQueueManager:
                 self._main_busy_task = None
             self._wakeup.set()
             await self._reevaluate()
+
+    async def _fail_and_refund(self, order_id: int, tg_id: int, reason: str):
+        """Заказ сломался (таймаут/исключение) — деньги списаны при создании,
+        но услуга не оказана, поэтому возвращаем сразу же, а не оставляем
+        висеть до ручного разбора админом. cancel_order_with_refund уже умеет
+        разносить бонус→bonus_balance, тенге→tenge_balance раздельно и
+        идемпотентен (см. её докстринг) — просто просим финальный статус
+        'error' вместо обычного 'cancelled', чтобы не путать в истории со
+        штатной отменой."""
+        from database import db as database
+        result = await database.cancel_order_with_refund(order_id, reason=reason, final_status="error")
+        refunded = result.get("refunded", 0) if result.get("ok") else 0
+        refund_note = (f"\n💰 Деньги возвращены на баланс: <b>{refunded:.0f} ₸</b>"
+                       if refunded else "")
+        support = await database.get_setting("help_username") or "@support"
+        await self._send(tg_id,
+            f"😔 <b>Не удалось получить отчёт.</b>{refund_note}\n"
+            f"Свяжитесь с нами: {support}\nНомер заказа: <b>#{order_id}</b>",
+        )
 
     # ── Вспомогательное ─────────────────────────────────────────────────────────
 

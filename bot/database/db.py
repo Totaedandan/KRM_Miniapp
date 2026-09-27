@@ -994,9 +994,15 @@ async def _get_charge_split(order_id: int, reason: str) -> dict:
         return {r[0]: float(r[1]) for r in await cur.fetchall()}
 
 
-async def cancel_order_with_refund(order_id: int, reason: str = "") -> dict:
+async def cancel_order_with_refund(order_id: int, reason: str = "", final_status: str = "cancelled") -> dict:
     """Отменить заказ и вернуть деньги пользователю — каждой валюте туда, откуда
     списывалась (бонус → bonus_balance, тенге → tenge_balance), а не всё в тенге.
+
+    `final_status` — какой статус проставить заказу ПОСЛЕ возврата денег:
+    обычный `cancel` (админ/таймаут на файл) — 'cancelled'; сбой самой
+    обработки (см. queue_manager._run_turnitin) — 'error', чтобы не путать
+    в истории "юзер/админ отменил" и "сломалось само", хотя деньги в обоих
+    случаях возвращаются одинаково.
 
     Возвращает dict: {ok, refunded, user_id, report_type, is_premium, status_before, error?}.
     Возврат только если деньги реально списывались (amount_tenge>0 и не whitelist).
@@ -1032,8 +1038,8 @@ async def cancel_order_with_refund(order_id: int, reason: str = "") -> dict:
 
     await update_order(
         order_id,
-        status="cancelled",
-        error_text=(reason or "cancelled")[:500],
+        status=final_status,
+        error_text=(reason or final_status)[:500],
     )
     return {
         "ok": True,
@@ -1256,11 +1262,51 @@ async def get_stats() -> dict:
                 "count": cnt or 0, "tenge": net or 0,
             }
 
+        # Легаси-путь: прямая оплата Kaspi-чеком в самом боте (payments.purpose='tokens').
         cur = await db.execute(
             "SELECT payment_type, COUNT(*), SUM(tokens_amount) FROM payments "
             "WHERE status='confirmed' AND purpose='tokens' GROUP BY payment_type"
         )
-        token_sales = {r[0]: {"count": r[1], "tokens": r[2] or 0} for r in await cur.fetchall()}
+        token_sales = {
+            f"{r[0]} (чек в боте)": {"count": r[1], "tokens": r[2] or 0}
+            for r in await cur.fetchall()
+        }
+
+        # Основной путь — покупка с баланса (webapp.py/api.py buy_tokens),
+        # reason='token_purchase': credit currency='token' — сколько токенов
+        # реально начислено; debit тенге/бонус в той же транзакции — сколько
+        # это стоило. Whitelist получает токены бесплатно (debit вообще не
+        # создаётся в этой ветке) — туда автоматически не попадает.
+        cur = await db.execute(
+            "SELECT COUNT(*), SUM(amount) FROM transactions "
+            "WHERE reason='token_purchase' AND type='credit' AND currency='token'"
+        )
+        cnt, tokens_sum = await cur.fetchone()
+        if cnt:
+            token_sales["с баланса"] = {"count": cnt, "tokens": tokens_sum or 0}
+
+        # Аренда ИИ — чистая выручка (списание минус возврат при отмене
+        # админом), отдельно по валюте. У аренды нет бесплатного whitelist-пути
+        # (в отличие от Turnitin/Хуманайзера — платят все, см. create_ai_rental),
+        # поэтому единственное, что реально искажает цифру — наши же
+        # тестовые/служебные аренды с админских аккаунтов. Их и исключаем.
+        from config import settings
+        admin_ids = settings.admin_id_list
+        placeholders = ",".join("?" * len(admin_ids)) or "NULL"
+        cur = await db.execute(
+            f"SELECT currency, "
+            f"SUM(CASE WHEN type='debit'  AND reason='ai_rental_charge' THEN amount ELSE 0 END) "
+            f"- SUM(CASE WHEN type='credit' AND reason='ai_rental_refund' THEN amount ELSE 0 END) AS net, "
+            f"COUNT(DISTINCT CASE WHEN type='debit' AND reason='ai_rental_charge' THEN order_id END) AS cnt "
+            f"FROM transactions WHERE reason IN ('ai_rental_charge','ai_rental_refund') "
+            f"AND user_id NOT IN ({placeholders}) GROUP BY currency",
+            admin_ids,
+        )
+        ai_rental_revenue = {}
+        for currency, net, cnt in await cur.fetchall():
+            ai_rental_revenue[currency_label.get(currency, currency)] = {
+                "count": cnt or 0, "tenge": net or 0,
+            }
 
     return {
         "total_users":         total_users,
@@ -1271,6 +1317,7 @@ async def get_stats() -> dict:
         "by_type_done":        by_type_done,
         "turnitin_revenue":    turnitin_revenue,
         "token_sales":         token_sales,
+        "ai_rental_revenue":   ai_rental_revenue,
     }
 
 
@@ -2341,10 +2388,16 @@ async def get_ai_account(account_id: int) -> Optional[dict]:
 
 async def get_ai_account_by_email(email: str) -> Optional[dict]:
     """Для резолва magic-link писем (Claude и т.п.) — там письмо приходит на
-    email аккаунта, но нет order_id/account_id, только сам адрес."""
+    email аккаунта, но нет order_id/account_id, только сам адрес.
+
+    LOWER() — регистронезависимо: email хранится ТАК, КАК ЕГО ВВЁЛ админ (см.
+    admin_ai_account_add в api.py — раньше принудительно приводился к нижнему
+    регистру при сохранении, из-за чего в каталоге "AODKd" превращался в
+    "aodkd"), а вызывающий код (сюда обычно приходит из вебхука/арендатора)
+    всегда сравнивает по email в нижнем регистре."""
     async with aiosqlite.connect(_DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cur = await db.execute("SELECT * FROM ai_accounts WHERE email=?", (email,))
+        cur = await db.execute("SELECT * FROM ai_accounts WHERE LOWER(email)=LOWER(?)", (email,))
         row = await cur.fetchone()
         return dict(row) if row else None
 
@@ -2576,12 +2629,13 @@ async def get_user_ai_rentals(tg_id: int, history_limit: int = 10) -> dict:
 
 
 async def get_active_ai_rental_by_email(user_id: int, email: str) -> Optional[dict]:
-    """Проверка владения: активна ли у этого юзера аренда именно этого email."""
+    """Проверка владения: активна ли у этого юзера аренда именно этого email.
+    LOWER() — см. комментарий в get_ai_account_by_email."""
     async with aiosqlite.connect(_DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             "SELECT r.* FROM ai_rentals r JOIN ai_accounts a ON a.id=r.account_id "
-            "WHERE r.user_id=? AND a.email=? AND r.status='active'",
+            "WHERE r.user_id=? AND LOWER(a.email)=LOWER(?) AND r.status='active'",
             (user_id, email),
         )
         row = await cur.fetchone()

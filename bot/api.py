@@ -1190,7 +1190,11 @@ class AiAccountBody(BaseModel):
 @app.post("/api/admin/ai/accounts")
 async def admin_ai_account_add(body: AiAccountBody, x_telegram_init_data: str = Header(None)):
     await _get_admin(x_telegram_init_data)
-    email = body.email.strip().lower()
+    # НЕ .lower() — сохраняем email ровно как ввёл админ (см. get_ai_account_by_email
+    # и get_active_ai_rental_by_email: там LOWER() при поиске, регистр при
+    # сравнении не важен, но раньше принудительный lower() тут портил логин,
+    # который потом показывается арендатору как есть, напр. "AODKd" → "aodkd").
+    email = body.email.strip()
     if not email:
         raise HTTPException(400, "Email обязателен")
     catalog_before = await database.get_ai_services_catalog()

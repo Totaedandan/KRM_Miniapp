@@ -68,6 +68,7 @@ async def adm_stats(callback: CallbackQuery):
     by_type = stats["by_type"]
     rev = stats["turnitin_revenue"]
     tok = stats["token_sales"]
+    ai_rev = stats["ai_rental_revenue"]
 
     lines = [
         "📊 <b>Статистика</b>\n",
@@ -90,6 +91,10 @@ async def adm_stats(callback: CallbackQuery):
     lines += ["", "🪙 <b>Продажа токенов:</b>"]
     for ptype, info in tok.items():
         lines.append(f"  • {ptype}: {info['count']} шт., {info['tokens'] or 0:.0f} токенов")
+
+    lines += ["", "🤖 <b>Выручка аренды ИИ:</b>"]
+    for currency, info in ai_rev.items():
+        lines.append(f"  • {currency}: {info['count']} шт., {info['tenge'] or 0:.0f} ₸")
 
     await callback.message.edit_text(
         "\n".join(lines), reply_markup=_back_kb(), parse_mode="HTML"

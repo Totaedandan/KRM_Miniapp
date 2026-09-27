@@ -31,7 +31,10 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 ALLOWED_EXT = {".pdf", ".docx", ".doc", ".txt", ".rtf"}  # используется и здесь, и api.py (Mini App upload)
-MIN_WORDS = 300
+# Минимум слов только для ИИ-детекции/комбо — короткий текст мешает модели
+# нормально определить AI-стиль. Для голого плагиата (sim) порога нет:
+# Similarity Report у Turnitin осмысленно работает и на коротких текстах.
+MIN_WORDS_AI = 450
 
 TYPE_LABEL = {"sim": "📊 Плагиат", "ai": "🤖 AI-детекция", "both": "✨ Оба отчёта"}
 
@@ -267,10 +270,10 @@ async def _validate_file(file_path: str, ext: str, report_type: str) -> tuple[bo
     text = await loop.run_in_executor(None, extract_text)
     words = len(text.split())
 
-    if words < MIN_WORDS:
+    if report_type in ("ai", "both") and words < MIN_WORDS_AI:
         return False, (
             f"❌ <b>Слишком мало текста</b>\n\n"
-            f"Нужно минимум <b>{MIN_WORDS} слов</b>, найдено: <b>{words}</b>.\n"
+            f"Для AI-детекции нужно минимум <b>{MIN_WORDS_AI} слов</b>, найдено: <b>{words}</b>.\n"
             f"Отправьте файл с большим объёмом текста (время ещё идёт)."
         )
     if words > 30000:

@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.turnitin.com"
 CHROMIUM_PATH = "/Users/totae/Library/Caches/ms-playwright/chromium-1187/chrome-mac/Chromium.app/Contents/MacOS/Chromium"
+REPORT_SETTLE_SEC = 20  # запас между "скор появился в строке" и "качаем PDF" — см. _get_report
 
 # Найти элемент по точному тексту через Shadow DOM
 FIND_BY_TEXT_JS = """(btnText) => {
@@ -780,6 +781,14 @@ class TurnitinService:
                 if lti:
                     ready = await self._is_report_ready(lti, rtype, order_id)
                     if ready:
+                        # Скор в строке появляется чуть раньше, чем Turnitin
+                        # на своей стороне до конца дорендерит сам просматриваемый
+                        # отчёт — если качать сразу по первому "готово", иногда
+                        # прилетает PDF с метаданными "Unknown" вместо реального
+                        # названия работы (недорендеренная версия). Небольшая
+                        # пауза перед переходом к скачиванию — тот самый "чуть
+                        # больше времени на запрос отчёта", который просил клиент.
+                        await asyncio.sleep(REPORT_SETTLE_SEC)
                         logger.info("%s report ready, downloading...", label)
                         result = await self._download_report(page, lti, rtype, out_path, order_id)
                         if result:

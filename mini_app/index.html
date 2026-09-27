@@ -1278,7 +1278,10 @@ function RentalScreen({ user, onNav, onBalanceUpdate }) {
             <div className="rent-ico"><RentIcon icon={s.icon} size={24}/></div>
             <div style={{flex:1,minWidth:0}}>
               <div style={{fontWeight:700,fontSize:16}}>{s.name}</div>
-              {s.description && <div style={{fontSize:12,color:'var(--txt2)',marginTop:2,lineHeight:1.45}}>{s.description}</div>}
+              {/* Полное описание — только в окне выбора тарифа (RentalSheet),
+                  которое и так открывается по клику на карточку. Раньше оно
+                  ещё и висело здесь целиком и раздувало карточку в списке,
+                  вытесняя остальные товары с экрана. */}
               <div style={{marginTop:8,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
                 {free
                   ? <span className="avail avail-on">Свободно: {s.available}</span>
@@ -1515,6 +1518,18 @@ function AdminScreen({ toast }) {
         ))}
         <div className="sec-title" style={{marginTop:14}}>Выручка Turnitin</div>
         {Object.entries(stats.turnitin_revenue||{}).map(([p,d]) => (
+          <div key={p} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:'1px solid var(--card-b)',fontSize:14}}>
+            <span style={{color:'var(--txt2)'}}>{p}</span> <b>{fmt(d.tenge)} ₸ · {d.count} шт</b>
+          </div>
+        ))}
+        <div className="sec-title" style={{marginTop:14}}>Продажи токенов хуманайзера</div>
+        {Object.entries(stats.token_sales||{}).map(([p,d]) => (
+          <div key={p} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:'1px solid var(--card-b)',fontSize:14}}>
+            <span style={{color:'var(--txt2)'}}>{p}</span> <b>{fmtT(d.tokens)} ток. · {d.count} шт</b>
+          </div>
+        ))}
+        <div className="sec-title" style={{marginTop:14}}>Выручка аренды ИИ</div>
+        {Object.entries(stats.ai_rental_revenue||{}).map(([p,d]) => (
           <div key={p} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:'1px solid var(--card-b)',fontSize:14}}>
             <span style={{color:'var(--txt2)'}}>{p}</span> <b>{fmt(d.tenge)} ₸ · {d.count} шт</b>
           </div>
