@@ -30,6 +30,13 @@ Telegram-бот для проверки работ через **Turnitin** (пл
 
 Статусы `turnitin_orders.status`: `pending` → `paid`/`queued` → `awaiting_file` → `ready` → `processing` → `done`/`error`/`cancelled`.
 `report_type`: `sim` (плагиат) | `ai` (AI-детекция) | `both`.
+`error` — деньги уже возвращены на баланс юзера (см. `_fail_and_refund` ниже), это закрытая история, не «зависший» заказ.
+
+**Валидация файла** (`handlers/turnitin.py::_validate_file`): минимум слов
+(`MIN_WORDS_AI=450`) и проверка английского языка (`lingua`, confidence≥0.80)
+применяются **только** к `report_type in ("ai","both")` — для голого `sim`
+(плагиат) ни минимума слов, ни проверки языка нет: Turnitin Similarity Report
+осмысленно работает и на коротком/неанглийском тексте.
 
 ## Премиум-очередь (РЕАЛИЗОВАНО — см. схему от клиента)
 
@@ -59,6 +66,24 @@ API: `POST /api/order` (поле `is_premium`), `GET /api/admin/queue`, `POST /a
 отмены остальные виснут» и «таймаут не работает» (по факту это была одна и
 та же проблема — orphaned task, а не два разных бага).
 
+**Возврат денег при сбое обработки (РЕАЛИЗОВАНО):** `PROCESS_TIMEOUT_SEC=900`
+(15 мин, было 3600). Раньше `_run_turnitin`'s `except TimeoutError`/`except
+Exception` только ставили `status="error"` и слали «обратитесь в поддержку» —
+деньги НЕ возвращались автоматически, юзер терял их до ручного разбора
+админом. Теперь оба блока зовут `_fail_and_refund()` →
+`cancel_order_with_refund(order_id, reason=..., final_status="error")` —
+`cancel_order_with_refund` получил параметр `final_status` (по умолчанию
+`"cancelled"`, старые вызовы не затронуты) именно чтобы отличать в истории
+«юзер/админ отменил» от «наша обработка провалилась, деньги возвращены
+автоматически»; сплит бонус/тенге и идемпотентность (`refund:<order_id>`,
+деньги не вернутся дважды) — те же, что и у обычной отмены.
+Как следствие, `_startup_recover()` **больше не** пере-пытается заказы в
+`error` после рестарта (старый `MAX_PROCESS_RETRIES=3` убран целиком) — раз
+деньги уже возвращены при самом сбое, молчаливый повторный успех после
+рестарта означал бы бесплатную услугу юзеру. После рестарта восстанавливаются
+только `processing → ready` (оборвалось деплоем, сам заказ ещё не признан
+проваленным) и `awaiting_file → queued`.
+
 **Приём файла — только Mini App (РЕАЛИЗОВАНО):** `POST /api/order/{id}/file`
 (multipart) — обычный HTTP на свой backend, Telegram в передаче не участвует,
 лимит **100 МБ** (реальный потолок самого Turnitin). Использует
@@ -71,6 +96,14 @@ API: `POST /api/order` (поле `is_premium`), `GET /api/admin/queue`, `POST /a
 отправить один и тот же файл путали юзеров. `handlers/turnitin.py::receive_file`
 теперь на входящий документ только отвечает, что файл принимается лишь через
 приложение, ничего не скачивает и не трогает статус заказа.
+
+**Пауза перед скачиванием отчёта (РЕАЛИЗОВАНО):** `turnitin_service.py`
+вставляет `REPORT_SETTLE_SEC=20` между «скор появился в строке» (это уже
+готовый отчёт по мнению `FIND_SCORE_IN_ROW_JS`) и собственно кликом на
+скачивание PDF — на практике скор в UI Turnitin иногда опережает
+дорендеривание самого отчёта на пару секунд, и скачивание «слишком рано»
+изредка приносило PDF с метаданными title="Unknown" вместо реального имени
+работы.
 
 Завершение: `update_order(status="ready", ...)` + `clear_pending_action` +
 `turnitin_queue.on_file_received(order_id)`. Таймер на 3 минуты
@@ -167,6 +200,13 @@ Turnitin.
 - **Пароли не хранятся** — вход (и арендатора, и бота при авто-разлогине)
   только через email+OTP; email на нашем домене — единственный секрет на
   аккаунте, не отдавать из каталога.
+- **Регистр email (РЕАЛИЗОВАНО)**: `ai_accounts.email` хранится **как ввёл
+  админ** (`POST /api/admin/ai/accounts` больше не форсит `.lower()` —
+  раньше это портило логин, показываемый арендатору, напр. "AODKd" →
+  "aodkd"). Точный поиск (`get_ai_account_by_email`,
+  `get_active_ai_rental_by_email`) сравнивает через `LOWER(email)=LOWER(?)`,
+  так что регистр при вводе арендатором/сервисом (OTP-эндпоинт, email-hook)
+  по-прежнему не важен — работает и для старых, и для новых аккаунтов.
 - Smoke-тест слоя БД: `python _test_ai_rental_db.py` (прокси-guard, LRU-выбор,
   бонус+тенге списание/возврат, идемпотентность, cooldown-окно).
 
@@ -221,6 +261,10 @@ Turnitin.
 - Градиент `--grad` — только на карточке баланса; остальное — solid `--accent`.
 - **Даты с сервера naive-UTC** → на фронте парсить через `parseUTC()` (добавляет 'Z'),
   иначе таймеры уедут на локальный сдвиг (+5ч в KZ).
+- **Описание услуги в каталоге аренды**: полностью показывается только в
+  `RentalSheet` (окно выбора тарифа, открывается по клику на карточку) — на
+  самой карточке списка (`svc-card`) description больше не рендерится, чтобы
+  длинный текст не раздувал карточку и не вытеснял остальные товары с экрана.
 
 ## Баланс через ledger (РЕАЛИЗОВАНО)
 
@@ -242,6 +286,17 @@ reason, balance_after, idempotency_key UNIQUE). Колонки `users.tenge_bala
 - Бэкфилл в `init_db`: старые балансы заносятся как `opening_balance` (ключ `opening:<cur>:<tg_id>`).
 - Админка: `GET /api/admin/transactions?q=` (история), `GET /api/admin/ledger_check` (сверка
   кэша с журналом, `reconcile_balances()` → пустой список = всё сходится).
+- **Статистика по выручке** (`db.get_stats()`, эндпоинт `GET /api/admin/stats`,
+  рендерится и в Mini App (экран «Статистика»), и в бот-чате `/admin` →
+  `adm_stats`): `turnitin_revenue`/`token_sales`/`ai_rental_revenue` считаются
+  **чистыми** по журналу — `SUM(debit, reason=X_charge) - SUM(credit,
+  reason=X_refund)`, сгруппировано по валюте — а не по легаси-таблице
+  `payments` (та почти не пополняется с тех пор, как заказы/покупки идут
+  через ledger, и раньше давала почти нулевые/неверные цифры). У аренды ИИ
+  нет бесплатного whitelist-пути (в отличие от Turnitin/Хуманайзера — платят
+  все, см. `create_ai_rental`), поэтому единственное, что искажает
+  `ai_rental_revenue` — свои же тестовые аренды с админских аккаунтов;
+  они исключаются по `user_id NOT IN (<admin_id_list>)`.
 
 ## Промокоды (РЕАЛИЗОВАНО)
 
@@ -282,7 +337,7 @@ reason, balance_after, idempotency_key UNIQUE). Колонки `users.tenge_bala
 
 - `Dockerfile` (корень) собирает образ: ставит системные либы для Chromium + Xvfb, pip-зависимости из `bot/requirements.txt`, `playwright install chromium`, копирует `bot/` → `/app/bot/` и `mini_app/` → `/app/mini_app/`. WORKDIR `/app/bot`, `ENTRYPOINT /app/entrypoint.sh`.
 - **`entrypoint.sh` ОБЯЗАТЕЛЕН:** Chromium запускается в headed-режиме (`headless=False` для обхода антибота Turnitin), поэтому нужен X-сервер. entrypoint поднимает `Xvfb :99`, экспортирует `DISPLAY=:99`, затем `exec python main.py`. Без него Playwright падает: «Missing X server or $DISPLAY».
-- **Возобновление очереди после краха/перезапуска** (`queue_manager._startup_recover`): `processing → ready`, `awaiting_file → queued`, а также `error` с сохранённым файлом → `ready` (до `MAX_PROCESS_RETRIES=3` повторов). Бот сам продолжает обрабатывать заказы по списку.
+- **Возобновление очереди после краха/перезапуска** (`queue_manager._startup_recover`): `processing → ready`, `awaiting_file → queued`. `error` НЕ трогается и не повторяется — с тех пор как обработка сама возвращает деньги при сбое (см. `_fail_and_refund` выше), заказ в `error` уже закрыт и оплачен обратно; молчаливый повтор после рестарта означал бы бесплатную услугу юзеру.
 - `docker-compose.yml`: сервис `bot`, порт `8000:8000`, volume `./data:/app/bot/data` (БД/отчёты/загрузки) и `./bot/assets:/app/bot/assets` (QR Kaspi), `shm_size: 256mb`.
 - `.dockerignore` исключает venv, __pycache__, локальные данные.
 - БД: `DATABASE_PATH=data/bot.db` в `.env` (внутри volume — переживает перезапуск).
