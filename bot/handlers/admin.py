@@ -90,7 +90,13 @@ async def adm_stats(callback: CallbackQuery):
 
     lines += ["", "🪙 <b>Продажа токенов:</b>"]
     for ptype, info in tok.items():
-        lines.append(f"  • {ptype}: {info['count']} шт., {info['tokens'] or 0:.0f} токенов")
+        money = []
+        if info.get("tenge"):
+            money.append(f"{info['tenge']:.0f} ₸")
+        if info.get("bonus"):
+            money.append(f"{info['bonus']:.0f} бонус")
+        money_str = f", {' + '.join(money)}" if money else ""
+        lines.append(f"  • {ptype}: {info['count']} шт., {info['tokens'] or 0:.0f} токенов{money_str}")
 
     lines += ["", "🤖 <b>Выручка аренды ИИ:</b>"]
     for currency, info in ai_rev.items():

@@ -1263,27 +1263,39 @@ async def get_stats() -> dict:
             }
 
         # Легаси-путь: прямая оплата Kaspi-чеком в самом боте (payments.purpose='tokens').
+        # amount_tenge тут всегда реальные тенге (Kaspi-чек), бонусами тут не платили.
         cur = await db.execute(
-            "SELECT payment_type, COUNT(*), SUM(tokens_amount) FROM payments "
+            "SELECT payment_type, COUNT(*), SUM(tokens_amount), SUM(amount_tenge) FROM payments "
             "WHERE status='confirmed' AND purpose='tokens' GROUP BY payment_type"
         )
         token_sales = {
-            f"{r[0]} (чек в боте)": {"count": r[1], "tokens": r[2] or 0}
+            f"{r[0]} (чек в боте)": {"count": r[1], "tokens": r[2] or 0, "tenge": r[3] or 0}
             for r in await cur.fetchall()
         }
 
         # Основной путь — покупка с баланса (webapp.py/api.py buy_tokens),
         # reason='token_purchase': credit currency='token' — сколько токенов
         # реально начислено; debit тенге/бонус в той же транзакции — сколько
-        # это стоило. Whitelist получает токены бесплатно (debit вообще не
-        # создаётся в этой ветке) — туда автоматически не попадает.
+        # это стоило (возвратов у покупки токенов не бывает, поэтому просто
+        # сумма, без вычитания refund как у turnitin/аренды). Whitelist получает
+        # токены бесплатно (debit вообще не создаётся в этой ветке) — туда
+        # автоматически не попадает.
         cur = await db.execute(
             "SELECT COUNT(*), SUM(amount) FROM transactions "
             "WHERE reason='token_purchase' AND type='credit' AND currency='token'"
         )
         cnt, tokens_sum = await cur.fetchone()
         if cnt:
-            token_sales["с баланса"] = {"count": cnt, "tokens": tokens_sum or 0}
+            cur = await db.execute(
+                "SELECT currency, SUM(amount) FROM transactions "
+                "WHERE reason='token_purchase' AND type='debit' AND currency IN ('tenge','bonus') "
+                "GROUP BY currency"
+            )
+            spent = {r[0]: r[1] or 0 for r in await cur.fetchall()}
+            token_sales["с баланса"] = {
+                "count": cnt, "tokens": tokens_sum or 0,
+                "tenge": spent.get("tenge", 0), "bonus": spent.get("bonus", 0),
+            }
 
         # Аренда ИИ — чистая выручка (списание минус возврат при отмене
         # админом), отдельно по валюте. У аренды нет бесплатного whitelist-пути

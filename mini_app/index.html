@@ -1524,8 +1524,12 @@ function AdminScreen({ toast }) {
         ))}
         <div className="sec-title" style={{marginTop:14}}>Продажи токенов хуманайзера</div>
         {Object.entries(stats.token_sales||{}).map(([p,d]) => (
-          <div key={p} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:'1px solid var(--card-b)',fontSize:14}}>
-            <span style={{color:'var(--txt2)'}}>{p}</span> <b>{fmtT(d.tokens)} ток. · {d.count} шт</b>
+          <div key={p} style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',padding:'8px 0',borderBottom:'1px solid var(--card-b)',fontSize:14}}>
+            <span style={{color:'var(--txt2)'}}>{p}</span>
+            <div style={{textAlign:'right'}}>
+              <b>{fmtT(d.tokens)} ток. · {d.count} шт</b>
+              {(d.tenge||d.bonus) ? <div style={{fontSize:12,color:'var(--txt2)',marginTop:2}}>{fmt(d.tenge||0)} ₸{d.bonus ? ` + ${fmt(d.bonus)} бонус` : ''}</div> : null}
+            </div>
           </div>
         ))}
         <div className="sec-title" style={{marginTop:14}}>Выручка аренды ИИ</div>
